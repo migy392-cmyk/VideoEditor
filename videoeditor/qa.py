@@ -127,6 +127,8 @@ def check_output(path: str, project: Project, beats: list[float] | None = None) 
         a, b = int(t * fps), int((t + seg.duration) * fps)
         if seg.type in ("black", "color"):
             planned_black[max(0, a - 2):b + 2] = True
+        if seg.type == "stack" and seg.panels:  # hasta que entran todos los paneles hay zonas negras
+            planned_black[a:a + int(max(p.appear for p in seg.panels) * fps) + 2] = True
         if any(e.type in ("fade_in", "fade_out") for e in seg.effects) or seg.transition.type == "fadeblack":
             planned_black[max(0, a - 8):a + 8] = True
             planned_black[max(0, b - 10):b + 2] = True

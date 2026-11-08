@@ -1,0 +1,122 @@
+{
+  "name": "Gym noche",
+  "id": "gym_noche",
+  "version": 1,
+  "sources": [
+    "referencia_gym.mov"
+  ],
+  "variants": [
+    {
+      "source": "referencia_gym.mov",
+      "start_beat": 0.0,
+      "bpm": 119.37,
+      "beat_synced": true,
+      "duration": 14.07,
+      "sections": [
+        {
+          "type": "black",
+          "until": "first_beat"
+        },
+        {
+          "type": "stack",
+          "beats": 6.25,
+          "panels": [
+            0.0,
+            2.0,
+            4.0
+          ],
+          "motion": 0.328
+        },
+        {
+          "type": "clip",
+          "beats": 4.75,
+          "motion": 1.0,
+          "transition": {
+            "type": "subject_drop",
+            "beats": 0.75,
+            "direction": "top"
+          }
+        },
+        {
+          "type": "clip",
+          "beats": 4.0,
+          "motion": 0.269
+        },
+        {
+          "type": "clip",
+          "beats": 3.75,
+          "motion": 0.219
+        },
+        {
+          "type": "clip",
+          "beats": 8.0,
+          "motion": 0.663,
+          "effects": [
+            {
+              "type": "glitch",
+              "at": "end",
+              "beats": 0.75
+            }
+          ]
+        },
+        {
+          "type": "black",
+          "beats": 0.25
+        }
+      ]
+    }
+  ],
+  "color": {
+    "r": [
+      0.0,
+      0.0039,
+      0.0314,
+      0.051,
+      0.0706,
+      0.0902,
+      0.1373,
+      0.2863,
+      0.5608
+    ],
+    "g": [
+      0.0,
+      0.0039,
+      0.0235,
+      0.0471,
+      0.0667,
+      0.0902,
+      0.1333,
+      0.2549,
+      0.498
+    ],
+    "b": [
+      0.0,
+      0.0039,
+      0.0353,
+      0.0588,
+      0.0745,
+      0.0941,
+      0.1333,
+      0.2431,
+      0.4667
+    ]
+  },
+  "color_weight": 1,
+  "letterbox": 0.0,
+  "output": {
+    "width": 1080,
+    "height": 1920
+  },
+  "updated": "2026-11-08T22:00:22",
+  "stats": {
+    "transitions": {
+      "cut": 4,
+      "subject_drop": 1
+    },
+    "effects": {
+      "glitch": 1
+    },
+    "avg_clip_beats": 5.12,
+    "uses_stack": true
+  }
+}

@@ -65,6 +65,46 @@ def _font_file(font: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _source_quantiles(path: str, inpoint: float, length: float) -> tuple[tuple[float, ...], ...]:
+    import numpy as np
+
+    from .analyze import QUANTILES
+
+    raw = ff.capture(["-ss", f"{inpoint:.3f}", "-t", f"{max(0.2, length):.3f}", "-i", path, "-an",
+                      "-vf", "fps=4,scale=64:-2,format=rgb24", "-f", "rawvideo", "-"])
+    px = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.float32) / 255.0
+    if len(px) == 0:
+        return tuple(tuple(QUANTILES) for _ in range(3))
+    return tuple(tuple(float(v) for v in np.quantile(px[:, c], QUANTILES)) for c in range(3))
+
+
+def _color_match_filter(src: Source, dur: float, target: dict, strength: float) -> str:
+    """Curvas RGB que llevan la distribución de color del clip hacia la aprendida."""
+    srcq = _source_quantiles(src.src, src.inpoint, dur * src.speed)
+    parts = []
+    for c, ch in enumerate("rgb"):
+        pts = [(0.0, 0.0)]
+        for x, y in zip(srcq[c], target[ch]):
+            y = x + strength * (y - x)
+            if pts[-1][0] + 0.01 < x < 0.99:
+                pts.append((x, max(pts[-1][1], min(1.0, y))))
+        pts.append((1.0, max(pts[-1][1], 1.0)))
+        parts.append(f"{ch}='" + " ".join(f"{x:.3f}/{y:.3f}" for x, y in pts) + "'")
+    return "curves=" + ":".join(parts)
+
+
+def _look(project: Project, seg: Segment, src: Source | None, dur: float) -> list[str]:
+    """Color de un plano: look aprendido (color_match) + grade + LUT."""
+    look = []
+    if project.color_match and src is not None and project.color_strength > 0:
+        look.append(_color_match_filter(src, dur, project.color_match, min(1.0, project.color_strength)))
+    look += grade_filters(seg.grade if seg.grade is not None else project.grade)
+    if project.lut:
+        look.append(f"lut3d=file='{project.lut}'")
+    return look
+
+
 def _text_filters(texts: list[Text], seg_dur: float, tmpdir: str, tag: str) -> list[str]:
     out = []
     for i, t in enumerate(texts):
@@ -96,9 +136,6 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
     w, h, fps = o.width, o.height, o.fps
     inputs: list[str] = []
     graph: list[str] = []
-    look = grade_filters(seg.grade if seg.grade is not None else project.grade)
-    if project.lut:
-        look.append(f"lut3d=file='{project.lut}'")
 
     if seg.type in ("black", "color"):
         color = "black" if seg.type == "black" else seg.color
@@ -106,6 +143,7 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
         graph.append("[0:v]setsar=1[base]")
     elif seg.type == "clip":
         inputs += _source_input(seg.source, dur)
+        look = _look(project, seg, seg.source, dur)
         graph.append("[0:v]" + ",".join(_source_chain(seg.source, dur, w, h, fps) + look) + "[base]")
     elif seg.type == "stack":
         n = len(seg.panels)
@@ -117,7 +155,7 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
             pdur = max(0.05, dur - appear)
             inputs += _source_input(p, pdur)
             # El look se aplica a cada panel para no teñir el fondo/gaps.
-            chain = _source_chain(p, pdur, w, ph, fps) + look
+            chain = _source_chain(p, pdur, w, ph, fps) + _look(project, seg, p, pdur)
             chain.append(f"setpts=PTS+{appear:.4f}/TB")
             graph.append(f"[{i + 1}:v]" + ",".join(chain) + f"[p{i}]")
             y = i * (ph + seg.gap) if i < n - 1 else h - ph
@@ -144,8 +182,19 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
     ]
 
 
+def _drop_xy(direction: str, start: float, d: float) -> tuple[str, str]:
+    p = f"pow(1-clip((t-{start:.4f})/{d:.4f}\\,0\\,1)\\,3)"  # ease-out cúbico
+    return {
+        "top": ("0", f"-main_h*{p}"),
+        "bottom": ("0", f"main_h*{p}"),
+        "left": (f"-main_w*{p}", "0"),
+        "right": (f"main_w*{p}", "0"),
+    }[direction]
+
+
 def build_assemble_command(project: Project, seg_files: list[str], durations: list[float],
-                           out_path: str) -> list[str]:
+                           out_path: str, cutouts: dict[int, str] | None = None) -> list[str]:
+    cutouts = cutouts or {}
     o = project.output
     segs = project.segments
     inputs: list[str] = []
@@ -154,12 +203,23 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
         inputs += ["-i", f]
         graph.append(f"[{i}:v]setpts=PTS-STARTPTS,fps={o.fps},settb=AVTB,setsar=1,format=yuv420p[v{i}]")
 
+    cut_idx = {}
+    for i, path in cutouts.items():
+        cut_idx[i] = len(seg_files) + len(cut_idx)
+        inputs += ["-i", path]
+
     cur = "v0"
     starts = project.segment_starts()
     for i in range(1, len(segs)):
         tr = segs[i].transition
         nxt = f"c{i}"
-        if tr.xfade is None:
+        if tr.type == "subject_drop" and i in cutouts:
+            x, y = _drop_xy(tr.direction, starts[i], tr.duration)
+            graph.append(f"[{cut_idx[i]}:v]setpts=PTS-STARTPTS+{starts[i]:.4f}/TB,format=yuva420p[cut{i}]")
+            graph.append(f"[{cur}][cut{i}]overlay=x='{x}':y='{y}':eval=frame:eof_action=pass[ov{i}]")
+            graph.append(f"[v{i}]trim=start={tr.duration:.4f},setpts=PTS-STARTPTS[vb{i}]")
+            graph.append(f"[ov{i}][vb{i}]concat=n=2:v=1:a=0[{nxt}]")
+        elif tr.xfade is None:
             graph.append(f"[{cur}][v{i}]concat=n=2:v=1:a=0[{nxt}]")
         else:
             graph.append(
@@ -173,7 +233,7 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
 
     m = project.music
     if m:
-        ai = len(seg_files)
+        ai = len(seg_files) + len(cutouts)
         inputs += ["-ss", f"{m.start:.4f}", "-i", m.src]
         af = [f"atrim=duration={total:.4f}", "asetpts=PTS-STARTPTS", f"volume={m.volume}",
               f"apad=whole_dur={total:.4f}"]
@@ -203,6 +263,33 @@ def preview_project(project: Project, scale: float = 0.5) -> Project:
     return replace(project, output=small)
 
 
+def _make_cutouts(project: Project, tmpdir: str, log) -> dict[int, str]:
+    """Recorta a la persona del inicio de cada segmento que entra con `subject_drop`.
+    Si no hay segmentación disponible se usa la transición de respaldo (slidedown)."""
+    from . import segment
+
+    o = project.output
+    out: dict[int, str] = {}
+    for i, seg in enumerate(project.segments):
+        tr = seg.transition
+        if tr.type != "subject_drop" or i == 0:
+            continue
+        if seg.type != "clip":
+            log(f"  Aviso: subject_drop en el segmento {i} necesita un clip; uso 'slidedown'")
+            continue
+        look = _look(project, seg, seg.source, tr.duration)
+        chain = ",".join(_source_chain(seg.source, tr.duration, o.width, o.height, o.fps) + look)
+        path = os.path.join(tmpdir, f"cutout_{i:03d}.mkv")
+        try:
+            log(f"  Recortando persona para la transición del segmento {i + 1}…")
+            segment.cutout_video(_source_input(seg.source, tr.duration), chain, o.width, o.height,
+                                 o.fps, tr.duration, path)
+            out[i] = path
+        except segment.SegmentationUnavailable as e:
+            log(f"  Aviso: {e}\n  Uso 'slidedown' en su lugar.")
+    return out
+
+
 def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp: bool = False,
            log=print) -> str:
     ff.require_ffmpeg()
@@ -220,9 +307,10 @@ def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp:
             ff.run(build_segment_command(project, seg, dur, path, tmpdir, str(i)), verbose=verbose)
             seg_files.append(path)
             durs.append(dur)
+        cutouts = _make_cutouts(project, tmpdir, log)
         log("  Uniendo segmentos y música…")
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-        ff.run(build_assemble_command(project, seg_files, durs, out_path), verbose=verbose)
+        ff.run(build_assemble_command(project, seg_files, durs, out_path, cutouts), verbose=verbose)
         log(f"  Listo en {time.time() - t0:.1f}s → {out_path}")
         return out_path
     finally:

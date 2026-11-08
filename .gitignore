@@ -7,3 +7,4 @@ out/
 *.MOV
 !examples/**/*.json
 .ve_cache/
+workspace/

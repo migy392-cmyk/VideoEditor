@@ -56,7 +56,11 @@ TRANSITIONS = {
     "squeezeh": "squeezeh",
     "squeezev": "squeezev",
     "hblur": "hblur",
+    # Especial: la persona del plano siguiente (recortada del fondo) entra sobre el plano actual.
+    "subject_drop": "slidedown",
 }
+
+DROP_DIRECTIONS = ("top", "bottom", "left", "right")
 
 
 class ProjectError(ValueError):
@@ -67,6 +71,7 @@ class ProjectError(ValueError):
 class Transition:
     type: str = "cut"
     duration: float = 0.0
+    direction: str = "top"  # sólo subject_drop
 
     @property
     def xfade(self) -> str | None:
@@ -148,6 +153,8 @@ class Project:
     music: Music | None = None
     grade: str = "none"
     lut: str | None = None
+    color_match: dict[str, list[float]] | None = None  # cuantiles RGB objetivo (look aprendido)
+    color_strength: float = 0.8
     base_dir: str = "."
 
     @property
@@ -209,7 +216,10 @@ def _transition(v: Any, where: str) -> Transition:
     if t not in TRANSITIONS:
         raise ProjectError(f"{where}: transición '{t}' desconocida. Opciones: {', '.join(TRANSITIONS)}")
     dur = 0.0 if t == "cut" else _num(v, "duration", 0.3, minimum=0.01, where=where)
-    return Transition(type=t, duration=dur)
+    direction = str(v.get("direction", "top"))
+    if direction not in DROP_DIRECTIONS:
+        raise ProjectError(f"{where}: 'direction' debe ser una de {', '.join(DROP_DIRECTIONS)}")
+    return Transition(type=t, duration=dur, direction=direction)
 
 
 def _effects(lst: Any, where: str) -> list[Effect]:
@@ -323,6 +333,10 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
         if tr.duration >= segments[i].duration:
             raise ProjectError(f"segments[{i}]: la transición ({tr.duration}s) debe ser más corta que el segmento")
 
+    cm = data.get("color_match")
+    if cm is not None:
+        if not (isinstance(cm, dict) and all(isinstance(cm.get(c), list) and len(cm[c]) >= 3 for c in "rgb")):
+            raise ProjectError("color_match debe tener listas 'r', 'g' y 'b' de cuantiles")
     lut = data.get("lut")
     return Project(
         output=output,
@@ -330,6 +344,8 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
         music=music,
         grade=grade,
         lut=_resolve(base_dir, lut) if lut else None,
+        color_match=cm,
+        color_strength=_num(data, "color_strength", 0.8, minimum=0, where="color_strength"),
         base_dir=base_dir,
     )
 

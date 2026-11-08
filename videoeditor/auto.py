@@ -58,7 +58,7 @@ class AutoOptions:
     fps: int = 30
     grade: str | None = None   # None: night_blue en plantillas, sin grade en estilos aprendidos
     max_duration: float | None = None
-    music_start: float = 0.0
+    music_start: float | None = None  # None: automático (estilos) / 0 (plantillas)
     smart_inpoints: bool = True
 
 
@@ -191,12 +191,12 @@ def build_project(clips: list[str], music: str, template: str = "gym_stack",
     for c in clips + [music]:
         if not os.path.exists(c):
             raise FileNotFoundError(c)
-    info = detect(music, start=opt.music_start, duration=opt.max_duration)
+    info = detect(music, start=opt.music_start or 0.0, duration=opt.max_duration)
     base = os.path.abspath(project_dir)
     segs = TEMPLATES[template](clips, info, opt, base)
     project = {
         "output": {"width": opt.width or 1080, "height": opt.height or 1920, "fps": opt.fps, "crf": 18},
-        "music": {"src": _rel(os.path.abspath(music), base), "start": opt.music_start, "fade_out": 0.4},
+        "music": {"src": _rel(os.path.abspath(music), base), "start": opt.music_start or 0.0, "fade_out": 0.4},
         "grade": opt.grade or "night_blue",
         "info": {"template": template, "bpm": info.bpm,
                  "beats": [round(b, 3) for b in info.beats[:64]]},

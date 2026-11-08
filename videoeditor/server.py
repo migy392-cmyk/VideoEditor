@@ -161,15 +161,21 @@ class App:
         clips = [self.path("clips", c) for c in req.get("clips", [])]
         music = self.path("music", req["music"])
         opt = AutoOptions(max_duration=req.get("duration") or None,
-                          music_start=float(req.get("music_start") or 0),
+                          music_start=float(req["music_start"]) if req.get("music_start") not in (None, "") else None,
                           grade=req.get("grade") or None,
                           smart_inpoints=not req.get("no_smart", False))
         pdir = self.path("projects")
         if req.get("style"):
             log("Aplicando estilo…")
             style = find_style(req["style"], self.path("styles"))
+            log("Analizando la canción (secciones, drop, energía, golpes)…")
             data, _ = apply_style(style, clips, music, opt, pdir, keep_order=bool(req.get("keep_order")),
-                                  color_strength=float(req.get("color_strength", 0.8)))
+                                  color_strength=float(req.get("color_strength", 0.8)),
+                                  follow_music=req.get("follow_music", True) is not False,
+                                  accents=req.get("accents", True) is not False)
+            mi = data.get("info", {})
+            log(f"Canción desde {data['music']['start']:.2f}s"
+                + (f" · drop en el segundo {mi['drop']:.2f} del edit" if mi.get("drop") is not None else ""))
         else:
             log("Aplicando plantilla…")
             data, _ = build_project(clips, music, req.get("template") or "gym_stack", opt, pdir)
@@ -199,6 +205,11 @@ class App:
         out_name = f"{safe_name(name)}{'_preview' if preview else ''}.mp4"
         render(project, os.path.join(self.ws, "renders", out_name), log=log)
         return {"output": out_name, "duration": round(project.total_duration, 2)}
+
+    def music_map(self, music: str) -> dict:
+        from .music import cached_music_map
+
+        return cached_music_map(self.path("music", music), os.path.join(self.ws, "cache")).to_dict()
 
     def beats(self, music: str, start: float, duration: float | None) -> dict:
         from .beats import detect
@@ -323,6 +334,8 @@ def make_handler(app: App):
                 if len(api) == 2 and api[0] == "jobs":
                     job = app.jobs.get(api[1])
                     return self.send_json(job) if job else self.error("Trabajo no encontrado", 404)
+                if len(api) == 2 and api[0] == "music":
+                    return self.send_json(app.music_map(api[1]))
                 if len(api) == 2 and api[0] == "beats":
                     dur = float(q["duration"]) if q.get("duration") else None
                     return self.send_json(app.beats(api[1], float(q.get("start", 0)), dur))

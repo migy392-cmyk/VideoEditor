@@ -28,12 +28,60 @@ def _even(x: float) -> int:
     return max(2, int(round(x / 2.0)) * 2)
 
 
+def speed_pieces(src: Source, dur: float) -> list[tuple[float, float, float]]:
+    """Tramos de velocidad constante: [(inicio en el edit, inicio en el clip, velocidad)].
+    Los cambios de una rampa se suavizan con varios escalones (curva en S)."""
+    pts: list[tuple[float, float]] = [(0.0, src.speed)]
+    prev = src.speed
+    for t, v in src.ramp:
+        e = src.ramp_ease
+        if e <= 0:
+            pts.append((t, v))
+        else:
+            n = 8
+            for k in range(n):
+                x = (k + 0.5) / n
+                sm = x * x * (3 - 2 * x)
+                tt = t - e / 2 + e * k / n
+                pts.append((max(0.0, tt), prev + (v - prev) * sm))
+        prev = v
+    pts = [p for p in sorted(pts) if p[0] < dur] or [(0.0, src.speed)]
+    pieces, s_pos = [], 0.0
+    for i, (t, v) in enumerate(pts):
+        if pieces:
+            o0, s0, v0 = pieces[-1]
+            s_pos = s0 + (t - o0) * v0
+        pieces.append((t, s_pos, v))
+    return pieces
+
+
+def source_length(src: Source, dur: float) -> float:
+    """Segundos de clip que consume un plano de `dur` segundos."""
+    o, s, v = speed_pieces(src, dur)[-1]
+    return s + (dur - o) * v
+
+
+def _nested(pieces: list[tuple[float, float, float]]) -> str:
+    """Expresión de setpts: tiempo de salida en función del tiempo de clip (T)."""
+    o, s0, v = pieces[-1]
+    out = f"{o:.5f}+(T-{s0:.5f})/{v:.5f}"
+    for i in range(len(pieces) - 2, -1, -1):
+        o, s0, v = pieces[i]
+        boundary = pieces[i + 1][1]
+        out = f"if(lt(T\\,{boundary:.5f})\\,{o:.5f}+(T-{s0:.5f})/{v:.5f}\\,{out})"
+    return out
+
+
 def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str]:
     """Filtros que convierten un input (ya recortado con -ss/-t) en un plano de w x h y `dur` segundos."""
     chain = []
     if src.reverse:
         chain.append("reverse")
-    chain.append(f"setpts=(PTS-STARTPTS)/{src.speed}")
+    if src.ramp and not src.reverse:
+        chain.append("setpts=PTS-STARTPTS")
+        chain.append(f"setpts='{_nested(speed_pieces(src, dur))}/TB'")
+    else:
+        chain.append(f"setpts=(PTS-STARTPTS)/{src.speed}")
     chain.append(f"fps={fps}")
     sw, sh = _even(w * src.zoom), _even(h * src.zoom)
     chain.append(f"scale={sw}:{sh}:force_original_aspect_ratio=increase:flags=lanczos")
@@ -41,7 +89,7 @@ def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str
     chain.append(f"crop={w}:{h}:x='(iw-ow)*{fx}':y='(ih-oh)*{fy}'")
     if src.mirror:
         chain.append("hflip")
-    # Si el clip es más corto que lo pedido se congela el último frame.
+    # Red de seguridad: si aun así faltara clip, se congela el último frame (el QA lo avisa).
     chain.append(f"tpad=stop_mode=clone:stop_duration={dur:.4f}")
     chain.append(f"trim=duration={dur:.4f}")
     chain.append("setsar=1")
@@ -49,7 +97,7 @@ def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str
 
 
 def _source_input(src: Source, dur: float) -> list[str]:
-    need = dur * src.speed + 0.25
+    need = source_length(src, dur) + 0.25
     return ["-ss", f"{src.inpoint:.4f}", "-t", f"{need:.4f}", "-i", src.src]
 
 

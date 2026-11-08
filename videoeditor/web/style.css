@@ -75,7 +75,7 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .sub .row { margin: 4px 0; }
 .timeline-wrap { overflow: hidden; }
 .timeline { position: relative; overflow-x: auto; padding-bottom: 8px; }
-.tl-inner { position: relative; height: 112px; }
+.tl-inner { position: relative; height: 124px; }
 .tl-ruler { position: absolute; top: 0; left: 0; height: 22px; right: 0; }
 .tl-beat { position: absolute; top: 8px; width: 1px; height: 14px; background: var(--line); }
 .tl-beat.bar { background: var(--muted); height: 22px; top: 0; }
@@ -92,3 +92,17 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--line);
   padding: 10px 14px; border-radius: 8px; z-index: 50; max-width: 420px; }
 .toast.err { border-color: var(--danger); }
+
+/* mapa musical */
+.mmap { margin: 10px 0; }
+.mmap .bars { position: relative; display: flex; align-items: flex-end; height: 70px; gap: 1px; background: #0a0b0e;
+  border-radius: 6px; overflow: hidden; padding: 0 2px; }
+.mmap .bars > i { flex: 1; min-width: 1px; border-radius: 1px 1px 0 0; }
+.mmap .secs { position: relative; height: 22px; margin-top: 3px; }
+.mmap .secs > div, .tl-secs > div { position: absolute; top: 0; height: 100%; font-size: 11px; padding: 2px 5px;
+  border-radius: 4px; overflow: hidden; white-space: nowrap; color: #fff; border-right: 2px solid var(--bg); }
+.mmap .drop, .tl-drop { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent2); }
+.mmap .drop::after { content: "DROP"; position: absolute; top: 2px; left: 4px; font-size: 10px; color: var(--accent2); font-weight: 700; }
+.sec-intro { background: #364fc7; } .sec-build { background: #e8590c; } .sec-drop { background: #c92a2a; }
+.sec-break { background: #5f3dc4; } .sec-verse { background: #2b8a3e; } .sec-outro { background: #495057; }
+.tl-secs { position: absolute; top: 104px; left: 0; height: 16px; right: 0; }

@@ -47,6 +47,48 @@ def onset_envelope(audio: np.ndarray) -> np.ndarray:
     return (flux - flux.mean()) / std
 
 
+def low_onsets(audio: np.ndarray) -> np.ndarray:
+    """Envolvente de golpes graves (bombo): decide en qué fase cae el beat."""
+    frames = np.lib.stride_tricks.sliding_window_view(audio, WIN)[::HOP]
+    spec = np.abs(np.fft.rfft(frames * np.hanning(WIN), axis=1))
+    freqs = np.fft.rfftfreq(WIN, 1 / SR)
+    low = np.log1p(spec[:, freqs < 180].sum(axis=1) * 10)
+    flux = np.maximum(0.0, np.diff(low, prepend=low[0]))
+    return flux / (flux.std() + 1e-9)
+
+
+def _refine_grid(env: np.ndarray, low: np.ndarray, step0: float) -> tuple[float, float]:
+    """Busca el periodo exacto (±3 %) y la fase de una rejilla regular que mejor
+    encaja con los golpes de toda la canción. Devuelve (periodo, primer beat) en frames."""
+    n = len(env)
+    x = np.arange(n)
+    e = np.maximum(env, 0)
+    best = (-1.0, step0, 0.0)
+    for step in np.linspace(step0 * 0.97, step0 * 1.03, 241):
+        k = np.arange(0, int(n / step))
+        phases = np.arange(0, step, 0.25)
+        pos = phases[:, None] + k[None, :] * step
+        pos = pos[:, :] if pos.size else pos
+        valid = pos < n - 1
+        sc = (np.interp(np.where(valid, pos, 0), x, e) * valid).sum(axis=1)
+        i = int(np.argmax(sc))
+        if sc[i] > best[0]:
+            best = (float(sc[i]), float(step), float(phases[i]))
+    _, step, phase = best
+    # ¿beat o contratiempo? El que tenga más bombo
+    k = np.arange(0, int(n / step) + 1)
+
+    def low_score(ph):
+        pos = ph + k * step
+        pos = pos[pos < n - 1]
+        return np.interp(pos, x, low).sum()
+
+    alt = (phase + step / 2) % step
+    if low_score(alt) > 1.15 * low_score(phase):
+        phase = alt
+    return step, phase
+
+
 def detect(path: str, start: float = 0.0, duration: float | None = None,
            min_bpm: float = 70, max_bpm: float = 180) -> BeatInfo:
     audio = load_audio(path, start, duration)
@@ -81,15 +123,8 @@ def detect(path: str, start: float = 0.0, duration: float | None = None,
         shift = 0.0
     period = (lag_i + shift) / fps
 
-    # Fase: el desplazamiento que más energía de onset acumula sobre la rejilla
-    step = period * fps
-    best_phase, best = 0.0, -1.0
-    for ph in np.arange(0, step, 0.5):
-        idx = np.round(np.arange(ph, len(e), step)).astype(int)
-        idx = idx[idx < len(e)]
-        s = e[idx].sum()
-        if s > best:
-            best, best_phase = s, ph
-    first = best_phase / fps
+    period, first = _refine_grid(e, low_onsets(audio), period * fps)
+    period /= fps
+    first /= fps
     beats = [round(float(t), 3) for t in np.arange(first, total, period)]
     return BeatInfo(bpm=round(float(60.0 / period), 2), period=float(period), beats=beats, onsets=onsets, duration=total)

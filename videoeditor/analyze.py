@@ -38,6 +38,10 @@ class Shot:
     flashes: list[float] = field(default_factory=list)  # flashes dentro del plano (relativos)
     transition: dict = field(default_factory=lambda: {"type": "cut"})  # cómo entra este plano
     motion: float = 0.0          # movimiento medio (relativo al video)
+    punches: list[tuple[float, float]] = field(default_factory=list)       # (t relativo, cantidad)
+    shakes: list[tuple[float, float, float]] = field(default_factory=list)  # (t, duración, cantidad)
+    speed: list[tuple[float, float, float]] = field(default_factory=list)   # (t, duración, velocidad)
+    texts: list[dict] = field(default_factory=list)  # {start, end (relativos), box, text}
 
     @property
     def duration(self) -> float:
@@ -112,12 +116,31 @@ def _gradual_regions(fr: np.ndarray, diff: np.ndarray, k: int = 4) -> list[tuple
 
 
 def analyze(path: str, fps: float = 30.0, cut_threshold: float = 3.0,
-            min_shot: float = 0.25) -> Analysis:
+            min_shot: float = 0.25, deep: bool = True) -> Analysis:
     w, h = ff.video_size(path)
     dur = ff.duration(path)
     rgb = _frames(path, fps)
     fr = rgb.mean(axis=3)
     n = len(fr)
+    mot = None
+    if deep:
+        from . import motionfx
+
+        mot = motionfx.frame_motion(motionfx.gray_frames(path, fps))
+        if len(mot["raw"]) < n:
+            mot = None
+    # un "corte" que se explica con un zoom o un desplazamiento de la imagen anterior no es un corte
+    camera_move = np.zeros(n, bool)
+    if mot is not None:
+        # Un desplazamiento grande y sostenido en una dirección es un slide (o un barrido),
+        # no un zoom de golpe o una sacudida: ahí sí se deja actuar al detector de cortes.
+        sustained = np.zeros(n, bool)
+        for comp in (mot["dx"][:n], mot["dy"][:n]):
+            sgn = np.where(np.abs(comp) >= 3, np.sign(comp), 0)
+            for i in range(n):
+                if sgn[i] and i + 2 < n and sgn[i] == sgn[i + 1] == sgn[i + 2]:
+                    sustained[i:i + 3] = True
+        camera_move = (mot["resid"][:n] < 0.45 * mot["raw"][:n]) & (mot["raw"][:n] > 1) & ~sustained
     if n < 2:
         raise ff.FFmpegError(f"'{path}' es demasiado corto para analizar")
     t = np.arange(n) / fps
@@ -186,7 +209,7 @@ def analyze(path: str, fps: float = 30.0, cut_threshold: float = 3.0,
         if suppress[i]:
             continue
         state_change = black[i] != black[i - 1] or (lit[i] != lit[i - 1]).any()
-        if (score[i] > cut_threshold and diff[i] > 6) or state_change:
+        if (score[i] > cut_threshold and diff[i] > 6 and not camera_move[i]) or state_change:
             if i - bounds[-1][0] >= 3 or state_change:
                 bounds.append((i, {"type": "cut"}))
     bounds += events
@@ -231,8 +254,10 @@ def analyze(path: str, fps: float = 30.0, cut_threshold: float = 3.0,
                 nxt.start = bridge.start
                 idx = j
                 continue
-        if cleaned and s.duration < min_shot and s.kind != "black" and cleaned[-1].kind != "black" \
-                and s.transition["type"] == "cut":
+        a_, b_ = int(round(s.start * fps)), int(round(s.end * fps))
+        glitchy = b_ > a_ and float(np.mean(green[a_:b_])) - float(np.median(green)) > 2.0
+        if cleaned and (s.duration < min_shot or (glitchy and s.duration < 0.45)) and s.kind != "black" \
+                and cleaned[-1].kind != "black" and s.transition["type"] == "cut":
             cleaned[-1].end = s.end
         else:
             cleaned.append(s)
@@ -279,6 +304,8 @@ def analyze(path: str, fps: float = 30.0, cut_threshold: float = 3.0,
         s.motion = round(m / mmax, 3)
 
     color, letterbox = _color_profile(rgb, black, merged, fps)
+    if mot is not None:
+        _deep_effects(path, merged, fps, mot)
 
     beats = None
     if ff.has_audio(path):
@@ -288,6 +315,39 @@ def analyze(path: str, fps: float = 30.0, cut_threshold: float = 3.0,
             beats = None
     return Analysis(width=w, height=h, duration=dur, fps=fps, shots=merged, beats=beats,
                     color=color, letterbox=letterbox)
+
+
+def _deep_effects(path: str, shots: list[Shot], fps: float, mot: dict) -> None:
+    """Zooms de golpe, temblores, cambios de velocidad y textos dentro de cada plano."""
+    from . import motionfx
+
+    n = len(mot["raw"])
+    for s in shots:
+        if s.kind != "full":
+            continue
+        a, b = int(round(s.start * fps)), min(n, int(round(s.end * fps)))
+        tr = s.transition
+        if tr.get("type") not in (None, "cut"):
+            a += int(tr.get("duration", 0) * fps)  # la transición no cuenta como efecto
+        if s.glitch_at is not None:  # el glitch empieza antes de que se note el verde
+            b = min(b, int((s.glitch_at - 0.4) * fps))
+        r = motionfx.detect_in_shot(mot, a, b, fps)
+        off = a / fps - s.start
+        s.punches = [(round(t + off, 3), amt) for t, amt in r["punches"]]
+        s.shakes = [(round(t + off, 3), d, amt) for t, d, amt in r["shakes"]]
+        s.speed = [(round(t + off, 3), d, sp) for t, d, sp in r["speed"]]
+    try:
+        texts = motionfx.text_regions(path, fps, [(s.start, s.end) for s in shots])
+    except ff.FFmpegError:
+        texts = []
+    for t in texts:
+        mid = (t["start"] + t["end"]) / 2
+        for s in shots:
+            if s.start <= mid < s.end:
+                s.texts.append({"start": round(max(0.0, t["start"] - s.start), 2),
+                                "end": round(min(s.duration, t["end"] - s.start), 2),
+                                "box": [float(v) for v in t["box"]], "text": t["text"]})
+                break
 
 
 def _classify_bridge(fr: np.ndarray, fps: float, prev: Shot, bridge: Shot, nxt: Shot) -> dict | None:
@@ -429,12 +489,26 @@ def report(a: Analysis) -> str:
             det.append("flash en +" + ", +".join(f"{f:.2f}s" for f in s.flashes))
         if s.glitch_at is not None:
             det.append(f"glitch desde {s.glitch_at:.2f}s")
+        if s.punches:
+            det.append("zoom de golpe en +" + ", +".join(f"{t:.2f}s" for t, _ in s.punches))
+        for t, d, amt in s.shakes:
+            det.append(f"temblor +{t:.2f}s ({d:.2f}s)")
+        for t, d, sp in s.speed:
+            det.append(f"cámara lenta x{sp:.2f} en +{t:.2f}s ({d:.2f}s)")
+        for tx in s.texts:
+            det.append(f"texto «{tx['text'] or '?'}» +{tx['start']:.2f}-{tx['end']:.2f}s")
         nb = nearest_beat(a.beats, s.start)
         if nb and i > 0:
             det.append(f"beat {nb[0]} ({nb[1] * 1000:+.0f} ms)")
         lines.append(f"{i:>2}  {s.start:7.2f}  {s.end:7.2f}  {s.duration:6.2f}  {s.kind:<6}  "
                      f"{s.motion:4.2f}  {'; '.join(det)}")
     return "\n".join(lines)
+
+
+def _text_spec(tx: dict, height: int) -> dict:
+    x, y, w, h = tx["box"]
+    return {"text": tx["text"] or "TEXTO", "start": tx["start"], "end": tx["end"],
+            "x": round(x + w / 2, 3), "y": round(y + h / 2, 3), "size": max(16, int(h * height * 1.15))}
 
 
 def to_template(a: Analysis) -> dict:
@@ -455,6 +529,14 @@ def to_template(a: Analysis) -> dict:
             n += 1
             seg = {"type": "clip", "src": f"clip{n}.mov", "in": 0.0, "duration": d}
             effects = [{"type": "flash", "times": s.flashes}] if s.flashes else []
+            effects += [{"type": "punch", "times": [t], "amount": amt} for t, amt in s.punches]
+            effects += [{"type": "shake", "at": t, "duration": d, "amount": amt} for t, d, amt in s.shakes]
+            if s.speed:
+                seg["ramp"] = []
+                for t, d, sp in s.speed:
+                    seg["ramp"] += [[t, sp], [round(t + d, 3), 1.0]]
+            if s.texts:
+                seg["texts"] = [_text_spec(tx, a.height) for tx in s.texts]
             if s.glitch_at is not None:
                 effects.append({"type": "glitch", "at": "end", "duration": round(s.end - s.glitch_at, 3)})
             if effects:

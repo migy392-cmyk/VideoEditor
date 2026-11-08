@@ -9,7 +9,7 @@
     {
       "source": "referencia_gym.mov",
       "start_beat": 0.0,
-      "bpm": 119.37,
+      "bpm": 120.61,
       "beat_synced": true,
       "duration": 14.07,
       "sections": [
@@ -31,6 +31,7 @@
           "type": "clip",
           "beats": 4.75,
           "motion": 1.0,
+          "music_energy": 0.799,
           "transition": {
             "type": "subject_drop",
             "beats": 0.75,
@@ -39,29 +40,28 @@
         },
         {
           "type": "clip",
-          "beats": 4.0,
-          "motion": 0.269
+          "beats": 4.25,
+          "motion": 0.269,
+          "music_energy": 0.874
         },
         {
           "type": "clip",
           "beats": 3.75,
-          "motion": 0.219
+          "motion": 0.219,
+          "music_energy": 0.862
         },
         {
           "type": "clip",
-          "beats": 8.0,
+          "beats": 8.25,
           "motion": 0.663,
+          "music_energy": 0.666,
           "effects": [
             {
               "type": "glitch",
               "at": "end",
-              "beats": 0.75
+              "beats": 1.0
             }
           ]
-        },
-        {
-          "type": "black",
-          "beats": 0.25
         }
       ]
     }
@@ -107,7 +107,7 @@
     "width": 1080,
     "height": 1920
   },
-  "updated": "2026-11-08T22:00:22",
+  "updated": "2026-11-08T22:34:05",
   "stats": {
     "transitions": {
       "cut": 4,
@@ -116,7 +116,7 @@
     "effects": {
       "glitch": 1
     },
-    "avg_clip_beats": 5.12,
+    "avg_clip_beats": 5.25,
     "uses_stack": true
   }
 }

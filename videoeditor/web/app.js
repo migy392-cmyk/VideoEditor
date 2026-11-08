@@ -89,8 +89,50 @@ async function loadLibrary() {
   if (!S.lib.renders.length) rl.append(h("li", { class: "muted" }, "Todavía no hay renders"));
 }
 
+const SEC_LABEL = { intro: "intro", build: "subida", drop: "drop", break: "bajada", verse: "parte media", outro: "final" };
+
+function musicMapView(m, from = 0, to = null) {
+  to = to ?? m.duration;
+  const span = Math.max(0.1, to - from);
+  const bars = h("div", { class: "bars" });
+  m.beats.forEach((b, i) => {
+    if (b < from || b >= to) return;
+    const e = m.beat_energy[i] ?? 0;
+    bars.append(h("i", { style: `height:${8 + 92 * e}%;background:hsl(${220 - 200 * e},70%,55%)`, title: `${b.toFixed(2)}s · energía ${e}` }));
+  });
+  const secs = h("div", { class: "secs" });
+  for (const s of m.sections) {
+    if (s.end <= from || s.start >= to) continue;
+    const a = Math.max(s.start, from), b = Math.min(s.end, to);
+    secs.append(h("div", { class: `sec-${s.label}`, style: `left:${100 * (a - from) / span}%;width:${100 * (b - a) / span}%`,
+      title: `${SEC_LABEL[s.label] || s.label} ${s.start.toFixed(1)}–${s.end.toFixed(1)}s` }, SEC_LABEL[s.label] || s.label));
+  }
+  const wrap = h("div", { class: "mmap" }, h("div", { class: "muted" },
+    `${Math.round(m.bpm)} BPM · ${m.sections.length} secciones · ${m.hits.length} golpes fuertes` + (m.drop != null ? ` · drop principal en ${m.drop.toFixed(2)}s` : "")),
+    bars, secs);
+  if (m.drop != null && m.drop >= from && m.drop < to) bars.append(h("div", { class: "drop", style: `left:${100 * (m.drop - from) / span}%` }));
+  return wrap;
+}
+
+async function showMusicMap(name, box) {
+  box.innerHTML = "Analizando la canción…";
+  try { const m = await api(`/api/music/${enc(name)}`); box.innerHTML = ""; box.append(musicMapView(m)); }
+  catch (e) { box.textContent = e.message; }
+}
+
 function libItem(kind, it, link = false) {
   const isVideo = it.width != null;
+  if (kind === "music") {
+    const box = h("div", { style: "width:100%" });
+    return h("li", { style: "flex-wrap:wrap" }, h("span", {}, "♪"),
+      h("div", { class: "grow" }, it.name, h("div", { class: "muted" }, fmt(it.duration))),
+      h("button", { onclick: () => showMusicMap(it.name, box) }, "Analizar"),
+      h("button", { class: "danger", title: "Borrar", onclick: async () => {
+        if (!confirm(`¿Borrar ${it.name}?`)) return;
+        await api(`/api/library/${kind}/${enc(it.name)}`, { method: "DELETE" });
+        loadLibrary();
+      } }, "✕"), box);
+  }
   return h("li", {},
     isVideo ? h("img", { src: `/api/thumb/${kind}/${enc(it.name)}?t=${Math.min(1, (it.duration || 2) / 2)}`, loading: "lazy" }) : h("span", {}, "♪"),
     h("div", { class: "grow" },
@@ -199,7 +241,9 @@ async function renderCreate() {
   if (!S.lib.music.length) mus.append(h("option", { value: "" }, "Sube una canción en la Biblioteca"));
   S.order = S.order.filter((n) => S.lib.clips.some((c) => c.name === n));
   drawClipPicker();
+  if (mus.value) showMusicMap(mus.value, $("#create-music-map"));
 }
+$("#create-music").addEventListener("change", (e) => e.target.value && showMusicMap(e.target.value, $("#create-music-map")));
 
 function drawClipPicker() {
   const box = $("#create-clips");
@@ -222,7 +266,9 @@ $("#create-btn").addEventListener("click", async () => {
   const sv = $("#create-style").value;
   const body = {
     clips: S.order, music: $("#create-music").value,
-    music_start: parseFloat($("#create-start").value) || 0,
+    music_start: $("#create-start").value === "" ? null : parseFloat($("#create-start").value),
+    follow_music: $("#create-follow").checked,
+    accents: $("#create-accents").checked,
     duration: parseFloat($("#create-duration").value) || null,
     color_strength: parseFloat($("#create-color").value),
     keep_order: $("#create-order").checked,
@@ -345,6 +391,14 @@ function drawTimeline() {
   beats.forEach((b, i) => { if (b <= total + 0.01) ruler.append(h("div", { class: "tl-beat" + (i % 4 === 0 ? " bar" : ""), style: `left:${b * pps}px` })); });
   for (let s = 0; s <= total; s++) ruler.append(h("div", { class: "tl-sec", style: `left:${s * pps}px` }, `${s}s`));
   inner.append(ruler);
+  const info = S.project.info || {};
+  if (info.sections) {
+    const band = h("div", { class: "tl-secs" });
+    for (const sec of info.sections) band.append(h("div", { class: `sec-${sec.label}`, style: `left:${sec.start * pps}px;width:${Math.max(2, (sec.end - sec.start) * pps)}px`,
+      title: `${SEC_LABEL[sec.label] || sec.label}` }, SEC_LABEL[sec.label] || sec.label));
+    inner.append(band);
+  }
+  if (info.drop != null) inner.append(h("div", { class: "tl-drop", style: `left:${info.drop * pps}px`, title: "drop" }));
   segs().forEach((s, i) => {
     const w = Math.max(6, s.duration * pps - 2);
     const src = s.type === "clip" ? s.src : s.type === "stack" ? s.panels?.[0]?.src : null;

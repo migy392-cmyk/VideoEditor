@@ -62,11 +62,16 @@ def cmd_auto(args: argparse.Namespace) -> int:
         print(f"Aplicando el estilo '{style['name']}' ({len(style['variants'])} variante(s))…")
         data, info = apply_style(style, args.clips, args.music, opt, project_dir,
                                  variant=args.variant, keep_order=args.keep_order,
-                                 color_strength=args.color_strength)
+                                 color_strength=args.color_strength,
+                                 follow_music=not args.no_music_follow, accents=not args.no_accents)
     else:
         print(f"Analizando música y clips (plantilla '{args.template}')…")
         data, info = build_project(args.clips, args.music, args.template, opt, project_dir)
     print(f"  Tempo: {info.bpm:.1f} BPM · {len(data['segments'])} segmentos")
+    mi = data.get("info", {})
+    if mi.get("sections"):
+        print(f"  Canción desde {data['music']['start']:.2f}s · drop en el edit: "
+              f"{mi['drop']:.2f}s" if mi.get("drop") is not None else "  (sin drop en el tramo)")
     with open(project_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     print(f"  Proyecto guardado en {project_path} (edítalo y vuelve a renderizar con 'render')")
@@ -123,6 +128,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_music(args: argparse.Namespace) -> int:
+    from .music import analyze_music, report
+
+    print(report(analyze_music(args.audio)))
+    return 0
+
+
 def cmd_beats(args: argparse.Namespace) -> int:
     from .beats import detect
 
@@ -170,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("-o", "--output")
     a.add_argument("--save", help="Ruta del proyecto JSON generado")
     a.add_argument("--duration", type=float, help="Duración máxima en segundos")
-    a.add_argument("--music-start", type=float, default=0.0, help="Segundo de la canción donde empezar")
+    a.add_argument("--music-start", type=float, help="Segundo de la canción donde empezar (por defecto, automático)")
+    a.add_argument("--no-music-follow", action="store_true",
+                   help="No adaptar el edit a la estructura de la canción (drop, energía, golpes)")
+    a.add_argument("--no-accents", action="store_true", help="Sin zooms/flashes automáticos en golpes y drop")
     a.add_argument("--grade", help="Look de color adicional (ver 'list')")
     a.add_argument("--width", type=int)
     a.add_argument("--height", type=int)
@@ -197,6 +212,10 @@ def main(argv: list[str] | None = None) -> int:
     z.add_argument("video")
     z.add_argument("--template", help="Guarda un proyecto esqueleto con los mismos tiempos")
     z.set_defaults(fn=cmd_analyze)
+
+    mu = sub.add_parser("music", help="Analiza una canción: secciones, drop, energía y golpes")
+    mu.add_argument("audio")
+    mu.set_defaults(fn=cmd_music)
 
     b = sub.add_parser("beats", help="Detecta tempo y beats de una canción")
     b.add_argument("audio")

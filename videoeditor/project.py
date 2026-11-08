@@ -99,6 +99,10 @@ class Source:
     appear: float = 0.0  # sólo para paneles: segundo (relativo al segmento) en que aparece
     mirror: bool = False
     reverse: bool = False
+    # Rampa de velocidad: cambios de velocidad en segundos del segmento [(t, velocidad), ...].
+    # Antes del primer punto se usa `speed`. Cada cambio se suaviza durante `ramp_ease` segundos.
+    ramp: tuple[tuple[float, float], ...] = ()
+    ramp_ease: float = 0.25
 
 
 @dataclass
@@ -204,7 +208,26 @@ def _source(d: dict, base: str, where: str) -> Source:
         appear=_num(d, "appear", 0.0, minimum=0, where=where),
         mirror=bool(d.get("mirror", False)),
         reverse=bool(d.get("reverse", False)),
+        ramp=_ramp(d.get("ramp"), where),
+        ramp_ease=_num(d, "ramp_ease", 0.25, minimum=0, where=where),
     )
+
+
+def _ramp(v: Any, where: str) -> tuple[tuple[float, float], ...]:
+    if not v:
+        return ()
+    pts = []
+    for i, p in enumerate(v):
+        if isinstance(p, dict):
+            p = (p.get("at", 0), p.get("speed", 1))
+        try:
+            t, sp = float(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            raise ProjectError(f"{where}.ramp[{i}]: usa [segundo, velocidad] o {{\"at\": s, \"speed\": v}}")
+        if sp < 0.05:
+            raise ProjectError(f"{where}.ramp[{i}]: la velocidad mínima es 0.05")
+        pts.append((t, sp))
+    return tuple(sorted(pts))
 
 
 def _transition(v: Any, where: str) -> Transition:

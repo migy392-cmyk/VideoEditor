@@ -140,13 +140,11 @@ def fx_punch(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
     amt = float(e.get("amount", 0.12))
     decay = max(0.02, float(e.get("decay", 0.18)))
     terms = "+".join(
-        f"{amt}*gte(t\\,{t:.4f})*exp(-(t-{t:.4f})/{decay})" for t in times
+        f"{amt}*gte(it\\,{t:.4f})*exp(-(it-{t:.4f})/{decay})" for t in times
     ) or "0"
-    z = f"(1+{terms})"
-    return [
-        f"scale=w='trunc({w}*{z}/2)*2':h='trunc({h}*{z}/2)*2':eval=frame",
-        f"crop={w}:{h}",
-    ]
+    # zoompan hace el zoom desde el centro (scale+crop dinámicos lo anclaban arriba a la izquierda)
+    return [f"zoompan=z='1+{terms}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={w}x{h}:fps={fps}",
+            "setsar=1"]
 
 
 def fx_flash(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:

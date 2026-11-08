@@ -47,6 +47,22 @@ def slugify(name: str) -> str:
 # Aprender
 # --------------------------------------------------------------------------- #
 
+def _music_energy_per_shot(a: Analysis, source: str) -> list[float | None]:
+    from .music import analyze_music
+
+    if not (a.beats and a.beats.beats):
+        return [None] * len(a.shots)
+    try:
+        mm = analyze_music(source)
+    except Exception:  # noqa: BLE001 - la energía es opcional
+        return [None] * len(a.shots)
+    out = []
+    for sh in a.shots:
+        idx = [i for i, b in enumerate(mm.beats) if sh.start - 0.05 <= b < sh.end]
+        out.append(round(float(np.mean([mm.beat_energy[i] for i in idx])), 3) if idx else None)
+    return out
+
+
 def variant_from_analysis(a: Analysis, source: str) -> dict:
     synced = bool(a.beats and a.beats.beats)
     b0 = a.beats.beats[0] if synced else 0.0
@@ -55,6 +71,7 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
     def pos(t: float) -> float:
         return (t - b0) / p
 
+    menergy = _music_energy_per_shot(a, source)
     sections = []
     for i, s in enumerate(a.shots):
         start, end = _q(pos(s.start), minimum=-1e9), _q(pos(s.end), minimum=-1e9)
@@ -71,11 +88,29 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
                    "motion": s.motion}
         else:
             sec = {"type": "clip", "beats": beats, "motion": s.motion}
+            if menergy[i] is not None:
+                sec["music_energy"] = menergy[i]
             fx = []
             if s.glitch_at is not None:
                 fx.append({"type": "glitch", "at": "end", "beats": _q((s.end - s.glitch_at) / p, Q)})
             if s.flashes:
                 fx.append({"type": "flash", "beats": [_q(f / p) for f in s.flashes]})
+            if s.punches:
+                fx.append({"type": "punch", "beats": [_q(t / p) for t, _ in s.punches],
+                           "amount": round(float(np.mean([a_ for _, a_ in s.punches])), 3)})
+            for t0, d, amt in s.shakes:
+                fx.append({"type": "shake", "at_beats": _q(t0 / p), "beats": _q(d / p, Q), "amount": amt})
+            if s.speed:
+                ramp = []
+                for t0, d, sp in s.speed:
+                    ramp += [[_q(t0 / p), sp], [_q((t0 + d) / p), 1.0]]
+                sec["ramp_beats"] = ramp
+            if s.texts:
+                sec["texts"] = [{"text": tx["text"] or "TEXTO", "start_beats": _q(tx["start"] / p),
+                                 "end_beats": _q(tx["end"] / p),
+                                 "x": round(tx["box"][0] + tx["box"][2] / 2, 3),
+                                 "y": round(tx["box"][1] + tx["box"][3] / 2, 3),
+                                 "size_frac": round(tx["box"][3] * 1.15, 3)} for tx in s.texts]
             if fx:
                 sec["effects"] = fx
         if sections and s.transition.get("type", "cut") != "cut":
@@ -109,6 +144,10 @@ def _stats(variants: list[dict]) -> dict:
                 trans[t] = trans.get(t, 0) + 1
             for e in s.get("effects", []):
                 effects[e["type"]] = effects.get(e["type"], 0) + 1
+            if s.get("ramp_beats"):
+                effects["camara_lenta"] = effects.get("camara_lenta", 0) + 1
+            if s.get("texts"):
+                effects["texto"] = effects.get("texto", 0) + len(s["texts"])
             if s["type"] == "clip":
                 clip_beats.append(s["beats"])
     return {
@@ -200,7 +239,8 @@ def _slots(sections: list[dict]) -> int:
     return sum(len(s["panels"]) if s["type"] == "stack" else 1 for s in sections if s["type"] in ("stack", "clip"))
 
 
-def _fit_sections(sections: list[dict], n_clips: int, max_beats: float | None) -> list[dict]:
+def _fit_sections(sections: list[dict], n_clips: int, max_beats: float | None,
+                  fill: bool = False) -> list[dict]:
     """Repite el 'cuerpo' (planos con corte seco y sin efectos) para usar más clips,
     o lo recorta si no cabe en la duración pedida."""
     secs = [dict(s) for s in sections]
@@ -211,7 +251,7 @@ def _fit_sections(sections: list[dict], n_clips: int, max_beats: float | None) -
     if body:
         insert_at = body[-1] + 1
         k = 0
-        while _slots(secs) < n_clips:
+        while _slots(secs) < n_clips or (fill and max_beats and total(secs) < max_beats):
             tpl = dict(sections[body[k % len(body)]])
             if max_beats and total(secs) + tpl["beats"] > max_beats:
                 break
@@ -245,9 +285,103 @@ def _clip_motion(path: str) -> float:
         return 0.0
 
 
+def _climax_beats(var: dict) -> float:
+    """Beats desde el primer beat hasta el primer plano completo tras la intro
+    (el momento que conviene hacer coincidir con el drop)."""
+    pos = float(var.get("start_beat", 0.0))
+    for sec in var["sections"]:
+        if sec["type"] == "black" and sec.get("until") == "first_beat":
+            continue
+        if sec["type"] == "clip":
+            tr = sec.get("transition") or {}
+            # si entra con transición, el impacto es al terminarla
+            return pos + (tr.get("beats", 0) if tr.get("type") not in (None, "cut") else 0)
+        pos += sec.get("beats", 0)
+    return 0.0
+
+
+def _pace_by_music(sections: list[dict], mm, b0: float, p: float, start_beat: float,
+                   max_beats: float | None) -> list[dict]:
+    """Adapta el ritmo de cortes a la canción:
+    - corta justo al empezar cada sección de la canción (drop, bajada…)
+    - más cortes si la canción tiene más energía que la referencia en ese punto, menos si tiene menos
+    """
+    bounds = [(sec.start - b0) / p for sec in mm.sections[1:]]
+    out: list[dict] = []
+    pos = start_beat
+    for sec in sections:
+        if sec["type"] != "clip" or sec.get("until"):
+            out.append(sec)
+            pos += sec.get("beats", 0)
+            continue
+        beats = sec["beats"]
+        body = "effects" not in sec and (sec.get("transition") or {}).get("type", "cut") == "cut"
+        t_mid = b0 + (pos + beats / 2) * p
+        e_new = mm.energy_at(t_mid)
+        e_ref = sec.get("music_energy", 0.7)
+        pieces = [beats]
+        if body:
+            if e_new >= e_ref + 0.25 and beats >= 4:
+                pieces = [beats / 2, beats / 2]
+            elif e_new <= e_ref - 0.3 and beats <= 4:
+                pieces = [beats * 2]
+        # partir en la frontera de sección musical si cae dentro del plano
+        split = []
+        cur = pos
+        for pc in pieces:
+            inner = [bd for bd in bounds if cur + 1 <= bd <= cur + pc - 1]
+            if inner and body:
+                bd = round(inner[0] / Q) * Q
+                split += [bd - cur, cur + pc - bd]
+            else:
+                split.append(pc)
+            cur += pc
+        for k, pc in enumerate(split):
+            piece = dict(sec)
+            piece["beats"] = pc
+            if k > 0:
+                piece.pop("transition", None)
+                piece.pop("effects", None)
+            out.append(piece)
+        pos += sum(split)
+    if max_beats:
+        total = start_beat
+        trimmed = []
+        for sec in out:
+            if total + sec.get("beats", 0) > max_beats + 1e-6 and sec["type"] == "clip" and trimmed:
+                # el último plano se ajusta para terminar justo en la duración
+                rest = max_beats - total
+                if rest >= 1:
+                    last = dict(sec)
+                    last["beats"] = rest
+                    trimmed.append(last)
+                break
+            trimmed.append(sec)
+            total += sec.get("beats", 0)
+        out = trimmed
+        # el efecto final (glitch…) del estilo va siempre en el último plano
+        final_fx = next((s_.get("effects") for s_ in reversed(sections) if s_["type"] == "clip" and s_.get("effects")), None)
+        if final_fx and out and out[-1]["type"] == "clip" and not out[-1].get("effects"):
+            out[-1] = dict(out[-1], effects=final_fx)
+    return out
+
+
 def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | None = None,
                 project_dir: str = ".", variant: int | None = None, keep_order: bool = False,
-                color_strength: float = 0.8) -> tuple[dict, object]:
+                color_strength: float = 0.8, follow_music: bool = True, accents: bool = True) -> tuple[dict, object]:
+    """Convierte estilo + clips + canción en un proyecto.
+
+    Con `follow_music` el editor primero analiza la canción (secciones, drop, energía,
+    golpes) y edita en función de ella:
+    - si no se indica dónde empezar la canción, elige el inicio para que el momento
+      fuerte del estilo coincida con el drop
+    - si no se indica duración, termina al acabar la sección del drop (en un compás)
+    - corta justo al cambiar de sección y ajusta la densidad de cortes a la energía
+    - cámara lenta en las bajadas y rampa de cámara lenta justo antes del drop
+    - flash + zoom de golpe en el drop y zooms en los golpes fuertes
+    """
+    from .music import cached_music_map
+
     opt = opt or AutoOptions()
     if not clips:
         raise ValueError("Hacen falta clips")
@@ -256,20 +390,51 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
         if not os.path.exists(c):
             raise FileNotFoundError(c)
     base = os.path.abspath(project_dir)
-    info = detect(music, start=opt.music_start, duration=opt.max_duration)
-    b0 = info.beats[0] if info.beats else 0.0
-    p = info.period
     var = _pick_variant(style, len(clips), variant)
-    max_beats = (opt.max_duration - b0) / p if opt.max_duration else None
-    sections = _fit_sections(var["sections"], len(clips), max_beats)
+    full = cached_music_map(music)
+    p = full.period
+
+    # --- dónde empieza la canción
+    lead = 1.0 if var["sections"] and var["sections"][0].get("until") == "first_beat" else 0.0
+    if opt.music_start is not None:
+        start = float(opt.music_start)
+    elif follow_music and full.drop is not None:
+        start = full.drop - (_climax_beats(var) + lead) * p
+        if start < 0:
+            start = 0.0
+        else:  # que caiga exactamente en un beat
+            start = max(0.0, min(full.beats, key=lambda b: abs(b - start)) if full.beats else start)
+    else:
+        start = 0.0
+    mm = full.shifted(start)
+    if not mm.beats:
+        raise ValueError("No se encontraron beats en la canción a partir de ese punto")
+    b0 = mm.beats[0]
+    if lead and b0 < 0.2:  # deja un beat de negro antes de empezar, como la referencia
+        b0 += p
+
+    # --- cuánto dura
+    natural = sum(sec.get("beats", 0) for sec in var["sections"]) * p + b0
+    if opt.max_duration:
+        target = min(opt.max_duration, mm.duration)
+    elif follow_music and mm.drop is not None:
+        sec = mm.section_at(mm.drop + 0.01)
+        target = min(45.0, mm.duration, max(natural, sec.end if sec else natural))
+    else:
+        target = None  # la duración natural del estilo (más larga si hay más clips)
+    max_beats = (target - b0) / p if target else None
+    start_beat = float(var.get("start_beat", 0.0))
+    sections = _fit_sections(var["sections"], len(clips), max_beats, fill=follow_music and not opt.max_duration)
+    if follow_music:
+        sections = _pace_by_music(sections, mm, b0, p, start_beat, max_beats)
 
     # Huecos para clips con su "movimiento" deseado
     slot_motion: list[float] = []
-    for s in sections:
-        if s["type"] == "stack":
-            slot_motion += [s.get("motion", 0.5)] * len(s["panels"])
-        elif s["type"] == "clip":
-            slot_motion.append(s.get("motion", 0.5))
+    for s_ in sections:
+        if s_["type"] == "stack":
+            slot_motion += [s_.get("motion", 0.5)] * len(s_["panels"])
+        elif s_["type"] == "clip":
+            slot_motion.append(s_.get("motion", 0.5))
     order = list(range(len(slot_motion)))
     pool = [clips[i % len(clips)] for i in range(len(slot_motion))]
     if not keep_order and len(set(pool)) > 1:
@@ -279,41 +444,49 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
         assigned = [""] * len(order)
         for si, c in zip(slots_sorted, clips_sorted):
             assigned[si] = c
+        # evita el mismo clip dos veces seguidas
+        for i in range(1, len(assigned)):
+            if assigned[i] == assigned[i - 1]:
+                for j in range(i + 1, len(assigned)):
+                    if assigned[j] != assigned[i] and (j + 1 >= len(assigned) or assigned[j + 1] != assigned[i - 1]):
+                        assigned[i], assigned[j] = assigned[j], assigned[i]
+                        break
         pool = assigned
 
     used_until: dict[str, float] = {}
 
     def inpoint(c: str, length: float) -> float:
         if c in used_until:  # clip repetido: siguiente tramo, o vuelta al principio
-            start = used_until[c]
-            if start + length > ff.duration(c):
-                start = 0.0
+            st = used_until[c]
+            if st + length > ff.duration(c):
+                st = 0.0
         else:
-            start = best_inpoint(c, length) if opt.smart_inpoints else 0.0
-        used_until[c] = start + length
-        return round(start, 3)
+            st = best_inpoint(c, length) if opt.smart_inpoints else 0.0
+        used_until[c] = st + length
+        return round(st, 3)
 
     segs: list[dict] = []
-    pos = float(var.get("start_beat", 0.0))  # en beats desde el primer beat
+    pos = start_beat  # en beats desde el primer beat
     slot = 0
 
     def t(beat: float) -> float:
         return b0 + beat * p
 
-    for s in sections:
-        if s["type"] == "black" and s.get("until") == "first_beat":
+    for s_ in sections:
+        if s_["type"] == "black" and s_.get("until") == "first_beat":
             if b0 > 0.05:
                 segs.append({"type": "black", "duration": round(b0, 3)})
             continue
-        dur = round(t(pos + s["beats"]) - max(0.0, t(pos)), 3)
+        dur = round(t(pos + s_["beats"]) - max(0.0, t(pos)), 3)
         if dur <= 0.02:
-            pos += s["beats"]
+            pos += s_["beats"]
             continue
-        if s["type"] == "black":
+        seg_start = max(0.0, t(pos))
+        if s_["type"] == "black":
             seg = {"type": "black", "duration": dur}
-        elif s["type"] == "stack":
+        elif s_["type"] == "stack":
             panels = []
-            for ap in s["panels"]:
+            for ap in s_["panels"]:
                 c = pool[slot]
                 slot += 1
                 appear = round(min(ap * p, dur * 0.9), 3)
@@ -322,16 +495,41 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
         else:
             c = pool[slot]
             slot += 1
-            seg = {"type": "clip", "src": _rel(c, base), "in": inpoint(c, dur), "duration": dur}
+            seg = {"type": "clip", "src": _rel(c, base), "duration": dur}
             fx = []
-            for e in s.get("effects", []):
+            for e in s_.get("effects", []):
                 if e["type"] == "glitch":
                     fx.append({"type": "glitch", "at": "end", "duration": round(min(e["beats"] * p, dur / 2), 3)})
                 elif e["type"] == "flash":
                     fx.append({"type": "flash", "times": [round(b * p, 3) for b in e["beats"]]})
-            if fx:
-                seg["effects"] = fx
-        tr = s.get("transition")
+                elif e["type"] == "punch":
+                    fx.append({"type": "punch", "times": [round(b * p, 3) for b in e["beats"]],
+                               "amount": e.get("amount", 0.1)})
+                elif e["type"] == "shake":
+                    fx.append({"type": "shake", "at": round(e.get("at_beats", 0) * p, 3),
+                               "duration": round(min(e["beats"] * p, dur), 3), "amount": e.get("amount", 0.5)})
+            if s_.get("texts"):
+                H = opt.height or style.get("output", {}).get("height", 1920)
+                seg["texts"] = [{"text": tx["text"], "start": round(tx["start_beats"] * p, 3),
+                                 "end": round(min(dur, tx["end_beats"] * p), 3), "x": tx["x"], "y": tx["y"],
+                                 "size": max(16, int(tx["size_frac"] * H))} for tx in s_["texts"]]
+            if s_.get("speed"):
+                seg["speed"] = s_["speed"]
+            if s_.get("ramp_beats"):
+                seg["ramp"] = [[round(b * p, 3), v] for b, v in s_["ramp_beats"]]
+            if follow_music:
+                lbl = (mm.section_at(seg_start + dur / 2) or None)
+                if lbl and lbl.label == "break" and "speed" not in seg and "ramp" not in seg:
+                    seg["speed"] = 0.6  # cámara lenta en las bajadas
+                if accents and mm.drop is not None:
+                    # zoom de golpe en golpes fuertes dentro de los drops
+                    if lbl and lbl.label == "drop":
+                        hit = next((h - seg_start for h in mm.hits if seg_start + 0.3 < h < seg_start + dur - 0.3), None)
+                        if hit is not None:
+                            fx.append({"type": "punch", "times": [round(hit, 3)], "amount": 0.06})
+            seg["effects"] = fx
+            seg["in"] = inpoint(c, dur * float(seg.get("speed", 1.0)))
+        tr = s_.get("transition")
         if tr and segs:
             d = round(min(tr["beats"] * p, dur * 0.8), 3)
             seg["transition"] = {"type": tr["type"], "duration": d}
@@ -339,21 +537,58 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
                 seg["transition"]["direction"] = tr["direction"]
         if style.get("letterbox"):
             seg.setdefault("effects", []).append({"type": "letterbox", "size": style["letterbox"]})
+        if not seg.get("effects"):
+            seg.pop("effects", None)
         segs.append(seg)
-        pos += s["beats"]
+        pos += s_["beats"]
+
+    if follow_music and accents and mm.drop is not None:
+        _accent_drop(segs, mm.drop, p)
 
     out = style.get("output", {})
+    total = sum(sg["duration"] for sg in segs)
     project = {
         "output": {"width": opt.width or out.get("width", 1080),
                    "height": opt.height or out.get("height", 1920),
                    "fps": opt.fps, "crf": 18},
-        "music": {"src": _rel(os.path.abspath(music), base), "start": opt.music_start, "fade_out": 0.4},
+        "music": {"src": _rel(os.path.abspath(music), base), "start": round(start, 3),
+                  "fade_in": 0.15 if start > 0 else 0.0, "fade_out": 0.6},
         "grade": opt.grade or "none",
-        "info": {"style": style.get("name"), "variant": var.get("source"), "bpm": info.bpm,
-                 "beats": [round(b, 3) for b in info.beats[:128]]},
+        "info": {"style": style.get("name"), "variant": var.get("source"), "bpm": mm.bpm,
+                 "beats": [round(b, 3) for b in mm.beats if b <= total + 0.01],
+                 "downbeats": [round(b, 3) for b in mm.downbeats if b <= total + 0.01],
+                 "drop": mm.drop if mm.drop is not None and mm.drop <= total else None,
+                 "sections": [{"start": round(x.start, 3), "end": round(min(x.end, total), 3), "label": x.label,
+                               "energy": x.energy} for x in mm.sections if x.start < total],
+                 "hits": [h for h in mm.hits if h <= total]},
         "segments": segs,
     }
     if style.get("color") and color_strength > 0:
         project["color_match"] = style["color"]
         project["color_strength"] = color_strength
-    return project, info
+    return project, mm
+
+
+def _accent_drop(segs: list[dict], drop: float, p: float) -> None:
+    """Rampa de cámara lenta en el beat antes del drop y flash + zoom en el drop."""
+    t = 0.0
+    for i, sg in enumerate(segs):
+        st, en = t, t + sg["duration"]
+        t = en
+        if abs(st - drop) < 0.06 and sg["type"] == "clip":
+            fx = sg.setdefault("effects", [])
+            if not any(e["type"] == "flash" for e in fx):
+                fx.insert(0, {"type": "flash", "times": [0.0], "amount": 0.55, "decay": 0.1})
+            fx[:] = [e for e in fx if not (e["type"] == "punch" and e["times"][0] < 1.0)]
+            fx.insert(0, {"type": "punch", "times": [0.0], "amount": 0.1})
+            prev = segs[i - 1] if i > 0 else None
+            if prev and prev["type"] == "clip" and "ramp" not in prev and prev["duration"] > 2 * p:
+                prev["ramp"] = [[round(prev["duration"] - p, 3), 0.35]]
+                prev["ramp_ease"] = round(min(0.3, p / 2), 3)
+            return
+        if st < drop < en and sg["type"] == "clip" and drop - st > 0.3:
+            fx = sg.setdefault("effects", [])
+            fx[:] = [e for e in fx if not (e["type"] == "punch" and abs(e["times"][0] - (drop - st)) < 1.0)]
+            fx.append({"type": "flash", "times": [round(drop - st, 3)], "amount": 0.55, "decay": 0.1})
+            fx.append({"type": "punch", "times": [round(drop - st, 3)], "amount": 0.1})
+            return

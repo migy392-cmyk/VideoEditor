@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+out/
+*.mp4
+*.mov
+*.MOV
+!examples/**/*.json
+.ve_cache/

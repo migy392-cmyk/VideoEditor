@@ -1,0 +1,30 @@
+{
+  "output": {"width": 1080, "height": 1920, "fps": 30, "crf": 18},
+  "music": {"src": "media/cancion.mp3", "start": 0.0, "fade_out": 0.3},
+  "grade": "night_blue",
+  "segments": [
+    {"type": "black", "duration": 0.5},
+    {
+      "type": "stack",
+      "duration": 3.0,
+      "panels": [
+        {"src": "media/press_banca.mov",   "in": 1.0, "appear": 0.0},
+        {"src": "media/mancuernas.mov",    "in": 0.5, "appear": 1.0},
+        {"src": "media/peso_muerto_1.mov", "in": 0.0, "appear": 2.0}
+      ]
+    },
+    {
+      "type": "clip", "src": "media/peso_muerto_2.mov", "in": 0.0, "duration": 2.5,
+      "transition": {"type": "slidedown", "duration": 0.45}
+    },
+    {"type": "clip", "src": "media/peso_muerto_3.mov", "in": 1.0, "duration": 2.0, "transition": "cut"},
+    {"type": "clip", "src": "media/peso_muerto_4.mov", "in": 0.0, "duration": 2.0, "transition": "cut",
+     "effects": [{"type": "punch", "times": [0.0, 1.0], "amount": 0.06}]},
+    {
+      "type": "clip", "src": "media/press_banca_2.mov", "in": 0.0, "duration": 4.0, "transition": "cut",
+      "texts": [{"text": "PUSH DAY", "y": 0.12, "size": 110, "start": 0.2, "end": 2.5}],
+      "effects": [{"type": "glitch", "at": "end", "duration": 0.6}]
+    },
+    {"type": "black", "duration": 0.15}
+  ]
+}

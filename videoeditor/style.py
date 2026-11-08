@@ -72,9 +72,26 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
         return (t - b0) / p
 
     menergy = _music_energy_per_shot(a, source)
+    def snap(x: float) -> float:
+        """Al beat si está cerca (la referencia puede tener pequeñas imprecisiones), si no a ½ beat."""
+        return float(round(x)) if abs(x - round(x)) <= 0.3 else round(x * 2) / 2
+
+    # Puntos de corte: si el plano entra con transición, lo que cae en el beat es el final
+    # de la transición (el impacto), no su inicio.
+    bounds = []
+    for s in a.shots:
+        ttype = s.transition.get("type", "cut")
+        moving = ttype not in ("cut", "fade", "fadeblack", "flash", "dissolve", "fadewhite")
+        d = s.transition.get("duration", 0) if moving else 0
+        if d:  # slide / persona que entra: en el beat cae el aterrizaje
+            bounds.append(snap(pos(s.start + d)) - _q(d / p, Q))
+        else:
+            bounds.append(snap(pos(s.start)))
+    ends = bounds[1:] + [snap(pos(a.shots[-1].end))] if a.shots else []
+
     sections = []
     for i, s in enumerate(a.shots):
-        start, end = _q(pos(s.start), minimum=-1e9), _q(pos(s.end), minimum=-1e9)
+        start, end = bounds[i], ends[i]
         sec: dict = {}
         if i == 0 and s.kind == "black" and s.start < 0.05 and abs(s.end - b0) < 0.2 and synced:
             sections.append({"type": "black", "until": "first_beat"})
@@ -368,7 +385,8 @@ def _pace_by_music(sections: list[dict], mm, b0: float, p: float, start_beat: fl
 
 def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | None = None,
                 project_dir: str = ".", variant: int | None = None, keep_order: bool = False,
-                color_strength: float = 0.8, follow_music: bool = True, accents: bool = True) -> tuple[dict, object]:
+                color_strength: float = 0.8, follow_music: bool = True, accents: bool = True,
+                sound_design: bool = True, cinematic: bool = False) -> tuple[dict, object]:
     """Convierte estilo + clips + canción en un proyecto.
 
     Con `follow_music` el editor primero analiza la canción (secciones, drop, energía,
@@ -563,6 +581,13 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
                  "hits": [h for h in mm.hits if h <= total]},
         "segments": segs,
     }
+    if sound_design:
+        project["sound_design"] = True
+    if cinematic:  # halo en las luces y grano de película en todos los planos con imagen
+        for sg in segs:
+            if sg["type"] in ("clip", "stack"):
+                sg.setdefault("effects", []).extend([{"type": "halation", "amount": 0.3},
+                                                     {"type": "film_grain", "amount": 7}])
     if style.get("color") and color_strength > 0:
         project["color_match"] = style["color"]
         project["color_strength"] = color_strength

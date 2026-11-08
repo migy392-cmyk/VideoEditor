@@ -63,7 +63,8 @@ def cmd_auto(args: argparse.Namespace) -> int:
         data, info = apply_style(style, args.clips, args.music, opt, project_dir,
                                  variant=args.variant, keep_order=args.keep_order,
                                  color_strength=args.color_strength,
-                                 follow_music=not args.no_music_follow, accents=not args.no_accents)
+                                 follow_music=not args.no_music_follow, accents=not args.no_accents,
+                                 sound_design=not args.no_sfx, cinematic=args.cinematic)
     else:
         print(f"Analizando música y clips (plantilla '{args.template}')…")
         data, info = build_project(args.clips, args.music, args.template, opt, project_dir)
@@ -186,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--no-music-follow", action="store_true",
                    help="No adaptar el edit a la estructura de la canción (drop, energía, golpes)")
     a.add_argument("--no-accents", action="store_true", help="Sin zooms/flashes automáticos en golpes y drop")
+    a.add_argument("--no-sfx", action="store_true", help="Sin efectos de sonido automáticos")
+    a.add_argument("--cinematic", action="store_true", help="Look de cine: halo en las luces y grano")
     a.add_argument("--grade", help="Look de color adicional (ver 'list')")
     a.add_argument("--width", type=int)
     a.add_argument("--height", type=int)

@@ -87,6 +87,8 @@
         <label class="inline"><input id="create-order" type="checkbox"> Respetar mi orden de clips</label>
         <label class="inline"><input id="create-follow" type="checkbox" checked> Editar según la canción</label>
         <label class="inline"><input id="create-accents" type="checkbox" checked> Zooms y flashes en golpes y drop</label>
+        <label class="inline"><input id="create-sfx" type="checkbox" checked> Efectos de sonido (whoosh, impacto, subida)</label>
+        <label class="inline"><input id="create-cine" type="checkbox"> Look de cine (halo y grano)</label>
         <label>Nombre del proyecto
           <input id="create-name" placeholder="mi_edit">
         </label>
@@ -112,6 +114,7 @@
         <span id="dirty" class="muted"></span>
       </div>
       <div id="render-job" class="job"></div>
+      <div id="qa-box"></div>
     </div>
     <div class="editor">
       <div class="player">
@@ -128,6 +131,8 @@
     </div>
     <div class="timeline-wrap panel">
       <div class="row">
+        <button id="undo-btn" title="Deshacer (Ctrl+Z)">↶</button>
+        <button id="redo-btn" title="Rehacer (Ctrl+Y)">↷</button>
         <button id="add-seg">+ Clip</button>
         <button id="dup-seg">Duplicar</button>
         <button id="left-seg">◀</button>

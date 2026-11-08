@@ -35,6 +35,13 @@ def capture(args: list[str]) -> bytes:
     return proc.stdout
 
 
+def capture_stderr(args: list[str]) -> str:
+    """Ejecuta ffmpeg y devuelve su salida de diagnóstico (para filtros de medida como ebur128)."""
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", *args]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return proc.stderr
+
+
 @lru_cache(maxsize=256)
 def probe(path: str) -> dict:
     cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]

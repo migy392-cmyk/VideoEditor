@@ -14,36 +14,57 @@ from .beats import BeatInfo, detect
 # Selección del mejor fragmento de cada clip (más movimiento)
 # --------------------------------------------------------------------------- #
 
-def motion_curve(path: str, fps: float = 6.0) -> tuple[np.ndarray, float]:
-    """Energía de movimiento por frame (muestreado a `fps`)."""
-    w, h = 32, 56
+from functools import lru_cache
+
+
+@lru_cache(maxsize=128)
+def clip_quality(path: str, fps: float = 6.0) -> tuple[np.ndarray, np.ndarray, float]:
+    """Por muestra: (movimiento, nitidez relativa) y fps de muestreo."""
+    w, h = 72, 128
     raw = ff.capture(["-i", path, "-an", "-vf", f"fps={fps},scale={w}:{h},format=gray",
                       "-f", "rawvideo", "-"])
     frames = np.frombuffer(raw, dtype=np.uint8)
     n = len(frames) // (w * h)
     if n < 2:
-        return np.zeros(1), fps
-    frames = frames[: n * w * h].reshape(n, h, w).astype(np.float32)
-    diff = np.abs(np.diff(frames, axis=0)).mean(axis=(1, 2))
-    return np.concatenate([[diff[0]], diff]), fps
+        return np.zeros(1), np.ones(1), fps
+    fr = frames[: n * w * h].reshape(n, h, w).astype(np.float32)
+    diff = np.abs(np.diff(fr, axis=0)).mean(axis=(1, 2))
+    motion = np.concatenate([[diff[0]], diff])
+    lap = (fr[:, 1:-1, 1:-1] * 4 - fr[:, :-2, 1:-1] - fr[:, 2:, 1:-1] - fr[:, 1:-1, :-2] - fr[:, 1:-1, 2:])
+    sharp = lap.var(axis=(1, 2))
+    sharp = sharp / (np.median(sharp) + 1e-6)
+    return motion, sharp, fps
+
+
+def motion_curve(path: str, fps: float = 6.0) -> tuple[np.ndarray, float]:
+    """Energía de movimiento por muestra."""
+    motion, _, f = clip_quality(path, fps)
+    return motion, f
 
 
 def best_inpoint(path: str, length: float, skip_edges: float = 0.3) -> float:
-    """Inicio del tramo de `length` segundos con más movimiento."""
+    """Inicio del mejor tramo de `length` segundos: mucho movimiento (la repetición, no
+    el momento de colocarse), imagen nítida (sin desenfoque por movimiento o cámara
+    temblando) y sin cambios bruscos de exposición."""
     dur = ff.duration(path)
     if dur <= length + 0.1:
         return 0.0
     try:
-        curve, fps = motion_curve(path)
+        motion, sharp, fps = clip_quality(path)
     except ff.FFmpegError:
         return max(0.0, (dur - length) / 2)
     win = max(1, int(round(length * fps)))
-    if len(curve) <= win:
+    if len(motion) <= win:
         return 0.0
-    sums = np.convolve(curve, np.ones(win), mode="valid")
+    m = motion / (np.percentile(motion, 90) + 1e-6)
+    # movimiento excesivo (>2x lo normal) suele ser cámara moviéndose o temblando
+    m = np.where(m > 2.0, 2.0 - (m - 2.0), m)
+    blur_pen = np.clip(sharp, 0.3, 1.2)
+    score = np.convolve(np.clip(m, 0, 2), np.ones(win), mode="valid") * \
+        np.convolve(blur_pen, np.ones(win) / win, mode="valid")
     lo = int(skip_edges * fps)
-    hi = max(lo + 1, len(sums) - int(skip_edges * fps))
-    i = lo + int(np.argmax(sums[lo:hi])) if hi > lo else int(np.argmax(sums))
+    hi = max(lo + 1, len(score) - int(skip_edges * fps))
+    i = lo + int(np.argmax(score[lo:hi])) if hi > lo else int(np.argmax(score))
     return round(float(min(i / fps, dur - length)), 3)
 
 

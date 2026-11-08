@@ -103,6 +103,7 @@ class Source:
     # Antes del primer punto se usa `speed`. Cada cambio se suaviza durante `ramp_ease` segundos.
     ramp: tuple[tuple[float, float], ...] = ()
     ramp_ease: float = 0.25
+    stabilize: str | None = None  # interno: archivo de vidstabdetect
 
 
 @dataclass
@@ -139,6 +140,7 @@ class Music:
     volume: float = 1.0
     fade_in: float = 0.0
     fade_out: float = 0.4
+    normalize: bool = True
 
 
 @dataclass
@@ -159,6 +161,12 @@ class Project:
     lut: str | None = None
     color_match: dict[str, list[float]] | None = None  # cuantiles RGB objetivo (look aprendido)
     color_strength: float = 0.8
+    beats: list[float] | None = None  # beats de la música (para revisar los cortes)
+    drop: float | None = None          # segundo del drop en el edit
+    sound_design: bool = False         # efectos de sonido automáticos (whoosh, impacto, subida…)
+    sfx: list[dict] | None = None      # efectos de sonido manuales [{type, at, duration?, volume?}]
+    sfx_volume: float = 1.0
+    motion_blur: bool = True           # desenfoque de movimiento en transiciones con movimiento
     base_dir: str = "."
 
     @property
@@ -281,6 +289,21 @@ def _texts(lst: Any, where: str) -> list[Text]:
     return out
 
 
+def _sfx_list(v: Any) -> list[dict] | None:
+    from .sfx import TYPES
+
+    if not v:
+        return None
+    out = []
+    for i, c in enumerate(v):
+        if c.get("type") not in TYPES:
+            raise ProjectError(f"sfx[{i}]: tipo '{c.get('type')}' desconocido. Opciones: {', '.join(TYPES)}")
+        out.append({"type": c["type"], "at": _num(c, "at", 0, minimum=0, where=f"sfx[{i}]"),
+                    "volume": _num(c, "volume", 0.6, minimum=0, where=f"sfx[{i}]"),
+                    **({"duration": _num(c, "duration", 0.5, minimum=0.1, where=f"sfx[{i}]")} if "duration" in c else {})})
+    return out
+
+
 def parse_project(data: dict, base_dir: str = ".") -> Project:
     from .effects import GRADES
 
@@ -310,6 +333,7 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
             volume=_num(m, "volume", 1.0, minimum=0, where="music"),
             fade_in=_num(m, "fade_in", 0.0, minimum=0, where="music"),
             fade_out=_num(m, "fade_out", 0.4, minimum=0, where="music"),
+            normalize=bool(m.get("normalize", True)),
         )
 
     segs_raw = data.get("segments")
@@ -368,6 +392,12 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
         grade=grade,
         lut=_resolve(base_dir, lut) if lut else None,
         color_match=cm,
+        beats=(data.get("info") or {}).get("beats"),
+        drop=(data.get("info") or {}).get("drop"),
+        sound_design=bool(data.get("sound_design", False)),
+        sfx=_sfx_list(data.get("sfx")),
+        sfx_volume=_num(data, "sfx_volume", 1.0, minimum=0, where="sfx_volume"),
+        motion_blur=bool(data.get("motion_blur", True)),
         color_strength=_num(data, "color_strength", 0.8, minimum=0, where="color_strength"),
         base_dir=base_dir,
     )

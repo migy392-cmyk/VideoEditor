@@ -13,7 +13,10 @@ from videoeditor.auto import AutoOptions, build_project
 from videoeditor.beats import detect
 from videoeditor.project import ProjectError, parse_project
 from videoeditor.render import render
-from videoeditor import segment
+from videoeditor import qa, segment
+from videoeditor.music import analyze_music
+from videoeditor.render import source_length
+from tests.synth import make_song
 from videoeditor.style import apply_style, learn, list_styles
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
@@ -189,11 +192,13 @@ class EditorTests(unittest.TestCase):
         out = os.path.join(self.dir, "styled.mp4")
         render(project, out, log=lambda *_: None)
         self.assertAlmostEqual(ff.duration(out), project.total_duration, delta=0.15)
-        t, starts = 0.0, []
+        t, hits = 0.0, []
         for s in data["segments"]:
-            starts.append(t)
+            tr = s.get("transition") or {}
+            moving = tr.get("type", "cut") not in ("cut", "fade", "fadeblack", "flash")
+            hits.append(t + (tr.get("duration", 0) if moving else 0))
             t += s["duration"]
-        for s in starts[1:]:
+        for s in hits[1:]:  # el corte (o el final de la transición) cae en un beat
             self.assertLess(min(abs(s - b) for b in info.beats), 0.02)
 
     @unittest.skipUnless(segment.available(), "MediaPipe no instalado")
@@ -205,6 +210,129 @@ class EditorTests(unittest.TestCase):
         out = os.path.join(self.dir, "drop.mp4")
         render(parse_project(data, self.dir), out, log=lambda *_: None)
         self.assertAlmostEqual(ff.duration(out), 2.0, delta=0.15)
+
+    # ---------------------------------------------------------------- música
+    def song(self):
+        if not hasattr(self, "_song"):
+            path = os.path.join(self.dir, "song.wav")
+            truth = make_song(path, offset=0.3)
+            type(self)._song = (path, truth)
+        return self._song
+
+    def test_music_analysis(self):
+        path, truth = self.song()
+        m = analyze_music(path)
+        self.assertAlmostEqual(m.bpm, 128, delta=0.5)
+        drops = [s.start for s in m.sections if s.label == "drop"]
+        for want in truth["starts"]["drop"]:
+            self.assertLess(min(abs(want - d) for d in drops), 0.3, (drops, want))
+        self.assertIsNotNone(m.drop)
+        self.assertLess(min(abs(m.drop - d) for d in truth["starts"]["drop"]), 0.3)
+        # los beats siguen la canción sin desfasarse (error < 40 ms en toda la canción)
+        p = truth["beat"]
+        err = max(abs((b - 0.3) / p - round((b - 0.3) / p)) * p for b in m.beats)
+        self.assertLess(err, 0.04)
+
+    def test_music_guided_style(self):
+        from videoeditor.style import find_style
+
+        path, truth = self.song()
+        style = find_style("gym_noche", None)
+        data, mm = apply_style(style, self.clips, path, AutoOptions(), self.dir)
+        info = data["info"]
+        self.assertIsNotNone(info["drop"])
+        # el momento fuerte del estilo (la persona aterriza tras la intro) cae en el drop
+        t, landing = 0.0, None
+        for sg in data["segments"]:
+            tr = sg.get("transition") or {}
+            if sg["type"] == "clip" and landing is None:
+                landing = t + (tr.get("duration", 0) if tr.get("type", "cut") != "cut" else 0)
+            t += sg["duration"]
+        self.assertAlmostEqual(landing, info["drop"], delta=0.08)
+        self.assertTrue(data.get("sound_design"))
+        self.assertTrue(any(e["type"] == "flash" for sg in data["segments"] for e in sg.get("effects", [])))
+        project = parse_project(self.small(data), self.dir)
+        out = os.path.join(self.dir, "guided.mp4")
+        rep = {}
+        render(project, out, log=lambda *_: None, report=rep)
+        self.assertAlmostEqual(ff.duration(out), project.total_duration, delta=0.15)
+        self.assertNotIn("satura", " ".join(rep["check"]["issues"]))
+        self.assertEqual(rep["check"]["stats"].get("cuts_off_beat", 0), 0, rep["check"]["issues"])
+
+    # ---------------------------------------------------------------- velocidad y efectos aprendidos
+    def test_speed_ramp(self):
+        data = {"output": {"width": 180, "height": 320, "fps": 30, "preset": "ultrafast"}, "segments": [
+            {"type": "clip", "src": self.clips[0], "duration": 2.0, "ramp": [[0.5, 0.25], [1.5, 1.0]], "ramp_ease": 0}]}
+        project = parse_project(data, self.dir)
+        self.assertAlmostEqual(source_length(project.segments[0].source, 2.0), 0.5 + 0.25 + 0.5, delta=0.01)
+        out = os.path.join(self.dir, "ramp.mp4")
+        render(project, out, log=lambda *_: None)
+        self.assertAlmostEqual(ff.duration(out), 2.0, delta=0.1)
+
+    def test_detects_punch_shake_speed_text(self):
+        c = self.clips
+        data = {"output": {"width": 360, "height": 640, "fps": 30, "crf": 20, "preset": "ultrafast"}, "segments": [
+            {"type": "clip", "src": c[0], "duration": 3, "effects": [{"type": "punch", "times": [1.0], "amount": 0.12}]},
+            {"type": "clip", "src": c[3], "duration": 3, "effects": [{"type": "shake", "at": 1.0, "duration": 1.0, "amount": 0.7}]},
+            {"type": "clip", "src": c[0], "duration": 3, "ramp": [[1.0, 0.3], [2.0, 1.0]]},
+            {"type": "clip", "src": c[4], "duration": 3, "texts": [{"text": "PUSH DAY", "y": 0.5, "size": 64, "start": 0.5, "end": 2.5}]},
+        ]}
+        out = os.path.join(self.dir, "fx9.mp4")
+        render(parse_project(data, self.dir), out, log=lambda *_: None, qa=False)
+        a = analyze(out)
+        self.assertEqual(len(a.shots), 4, [(s.start, s.end) for s in a.shots])
+        self.assertTrue(a.shots[0].punches and abs(a.shots[0].punches[0][0] - 1.0) < 0.1)
+        self.assertTrue(a.shots[2].speed and a.shots[2].speed[0][2] < 0.5)
+        if shutil.which("tesseract"):
+            self.assertTrue(any("PUSH" in t["text"] for t in a.shots[3].texts), a.shots[3].texts)
+
+    # ---------------------------------------------------------------- calidad
+    def test_quality_checks(self):
+        data = {"output": {"width": 180, "height": 320, "fps": 30, "preset": "ultrafast"}, "music": {"src": self.music},
+                "segments": [{"type": "clip", "src": self.clips[0], "duration": 1.0},
+                             {"type": "clip", "src": self.clips[0], "in": 2.0, "duration": 2.5}]}
+        project = parse_project(data, self.dir)
+        fixed, warns = qa.preflight(project)
+        self.assertTrue(warns)
+        s2 = fixed.segments[1].source
+        self.assertLessEqual(s2.inpoint + source_length(s2, 2.5), ff.duration(self.clips[0]) + 0.05)
+        out = os.path.join(self.dir, "frozen.mp4")
+        render(project, out, log=lambda *_: None, qa=False)
+        self.assertTrue(any("congelada" in i for i in qa.check_output(out, project)["issues"]))
+        rep = {}
+        render(project, out, log=lambda *_: None, report=rep)
+        self.assertFalse(any("congelada" in i for i in rep["check"]["issues"]))
+
+    def test_hdr_is_tonemapped(self):
+        hdr = os.path.join(self.dir, "hdr.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=180x320:rate=30:duration=1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_primaries", "bt2020",
+                        "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc", hdr], check=True)
+        self.assertTrue(qa.is_hdr(hdr))
+        out = os.path.join(self.dir, "hdr_out.mp4")
+        render(parse_project(self.small({"segments": [{"type": "clip", "src": hdr, "duration": 0.8}]}), self.dir),
+               out, log=lambda *_: None)
+        self.assertAlmostEqual(ff.duration(out), 0.8, delta=0.15)
+
+    # ---------------------------------------------------------------- cine y sonido
+    def test_cinematic_and_sound(self):
+        c = self.clips
+        data = self.small({"music": {"src": self.music}, "sound_design": True, "grade": "film",
+                           "sfx": [{"type": "hit", "at": 0.2}],
+                           "info": {"drop": 1.5, "beats": [i * 0.5 for i in range(20)]},
+                           "segments": [
+                               {"type": "clip", "src": c[0], "duration": 1.5, "effects": [{"type": "stabilize"}]},
+                               {"type": "clip", "src": c[1], "duration": 1.5, "transition": {"type": "slideup", "duration": 0.4},
+                                "effects": [{"type": "halation"}, {"type": "film_grain"}, {"type": "glitch", "duration": 0.5}]}]})
+        project = parse_project(data, self.dir)
+        from videoeditor.render import _sfx_cues
+        kinds = {c_["type"] for c_ in _sfx_cues(project)}
+        self.assertTrue({"whoosh", "impact", "glitch", "hit"} <= kinds, kinds)
+        out = os.path.join(self.dir, "cine.mp4")
+        rep = {}
+        render(project, out, log=lambda *_: None, report=rep)
+        self.assertAlmostEqual(ff.duration(out), 3.0, delta=0.15)
+        self.assertLess(rep["check"]["stats"]["peak_db"], -0.1)
 
 
 @unittest.skipUnless(HAS_FFMPEG, "ffmpeg no instalado")

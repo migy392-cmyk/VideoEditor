@@ -172,7 +172,9 @@ class App:
             data, _ = apply_style(style, clips, music, opt, pdir, keep_order=bool(req.get("keep_order")),
                                   color_strength=float(req.get("color_strength", 0.8)),
                                   follow_music=req.get("follow_music", True) is not False,
-                                  accents=req.get("accents", True) is not False)
+                                  accents=req.get("accents", True) is not False,
+                                  sound_design=req.get("sound_design", True) is not False,
+                                  cinematic=bool(req.get("cinematic")))
             mi = data.get("info", {})
             log(f"Canción desde {data['music']['start']:.2f}s"
                 + (f" · drop en el segundo {mi['drop']:.2f} del edit" if mi.get("drop") is not None else ""))
@@ -203,8 +205,9 @@ class App:
         if preview:
             project = preview_project(project)
         out_name = f"{safe_name(name)}{'_preview' if preview else ''}.mp4"
-        render(project, os.path.join(self.ws, "renders", out_name), log=log)
-        return {"output": out_name, "duration": round(project.total_duration, 2)}
+        report: dict = {}
+        render(project, os.path.join(self.ws, "renders", out_name), log=log, report=report)
+        return {"output": out_name, "duration": round(project.total_duration, 2), "qa": report}
 
     def music_map(self, music: str) -> dict:
         from .music import cached_music_map

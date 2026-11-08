@@ -40,19 +40,19 @@
         },
         {
           "type": "clip",
-          "beats": 4.25,
+          "beats": 4.0,
           "motion": 0.269,
           "music_energy": 0.874
         },
         {
           "type": "clip",
-          "beats": 3.75,
+          "beats": 4.0,
           "motion": 0.219,
           "music_energy": 0.862
         },
         {
           "type": "clip",
-          "beats": 8.25,
+          "beats": 8.5,
           "motion": 0.663,
           "music_energy": 0.666,
           "effects": [
@@ -107,7 +107,7 @@
     "width": 1080,
     "height": 1920
   },
-  "updated": "2026-11-08T22:34:05",
+  "updated": "2026-11-08T22:40:26",
   "stats": {
     "transitions": {
       "cut": 4,
@@ -116,7 +116,7 @@
     "effects": {
       "glitch": 1
     },
-    "avg_clip_beats": 5.25,
+    "avg_clip_beats": 5.31,
     "uses_stack": true
   }
 }

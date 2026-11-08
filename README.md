@@ -32,6 +32,31 @@ pip install -r requirements.txt
 transición se convierte en un deslizamiento normal. En Linux, MediaPipe necesita
 además `libegl1` y `libgles2` (`apt-get install libegl1 libgles2`).
 
+`tesseract` (opcional, `apt-get install tesseract-ocr tesseract-ocr-spa`) permite leer
+los textos de los videos de referencia. FFmpeg debe incluir `zscale` (HDR) y `vidstab`
+(estabilización); las versiones de Ubuntu/Debian y Homebrew los traen.
+
+## Primero, la música
+
+Antes de montar nada, el editor analiza la canción (`python -m videoeditor music cancion.mp3`,
+o *Analizar* en la Biblioteca):
+
+- **tempo exacto** y beats sin desfase a lo largo de toda la canción, y primer tiempo de cada compás;
+- **secciones**: intro, subida, drop, bajada y final, con su energía;
+- el **drop principal**, los **golpes fuertes** y las pausas.
+
+Y edita en función de ella:
+
+- si no le dices dónde empezar la canción, elige el inicio para que el **momento fuerte del
+  estilo caiga en el drop** (en el estilo incluido: la persona aterriza justo en el drop);
+- si no le dices la duración, **termina al acabar la sección del drop**, en un compás;
+- **corta en cada cambio de sección** de la canción y pone **más cortes** donde la canción
+  tiene más energía que la referencia y **menos** donde tiene menos;
+- **cámara lenta** en las bajadas y una **rampa de cámara lenta** en el beat anterior al drop;
+- **flash + zoom de golpe en el drop** y zooms en los golpes fuertes;
+- **efectos de sonido** sintetizados: whoosh en las transiciones, impacto en el drop,
+  subida de tensión los 2 compases antes y sonido de glitch.
+
 ## Interfaz web
 
 ```bash
@@ -45,11 +70,15 @@ Todo se guarda en la carpeta `workspace/` (cámbiala con `-w otra_carpeta`).
    "receta" del estilo: planos, paneles, transiciones y efectos medidos en beats.
    Si aprendes con un nombre que ya existe, el video se añade como otra variante
    del mismo estilo y el color se promedia.
-3. **Nuevo edit**: elige estilo, canción y clips (en orden), y pulsa *Crear edit*.
+3. **Nuevo edit**: elige estilo, canción y clips (en orden), y pulsa *Crear edit*. Verás el
+   mapa de la canción. Opciones: editar según la canción, zooms y flashes automáticos,
+   efectos de sonido y look de cine.
 4. **Editor**: línea de tiempo con los beats de la canción. Haz clic en un segmento
    para cambiar el clip, el punto de entrada, la duración, la transición, los efectos
    o los textos. *Ajustar al beat* lleva el final del segmento al beat más cercano.
-   *Vista previa rápida* renderiza a media resolución; *Render final*, a calidad completa.
+   Sobre la línea de tiempo se ven las secciones de la canción y el drop.
+   *Deshacer/Rehacer* (Ctrl+Z / Ctrl+Y). *Vista previa rápida* renderiza a media resolución;
+   *Render final*, a calidad completa. Al terminar se muestra la **revisión de calidad**.
 
 ## Aprender estilos de tus videos
 
@@ -65,6 +94,10 @@ El editor analiza un video de referencia y detecta:
 | Deslizamiento (slide) y su dirección | el contenido nuevo avanza desde un borde |
 | Persona recortada que entra sobre el plano anterior | sólo cambia una parte de la imagen y avanza desde un borde |
 | Glitch digital | dominante verde/ruido al final de un plano |
+| Zoom de golpe | la imagen salta de escala de un fotograma a otro y luego vuelve |
+| Temblor de cámara | sacudidas rápidas de ida y vuelta de la imagen |
+| Cámara lenta / rampa de velocidad | el movimiento cae mucho dentro de un plano y luego se recupera |
+| Textos sobreimpresos (y qué dicen) | zona fija y muy contrastada + OCR con tesseract |
 | Barras de cine | filas siempre negras arriba y abajo |
 | Cuánto movimiento tiene cada plano | energía de movimiento |
 | Look de color | distribución de color (cuantiles RGB) |
@@ -72,7 +105,8 @@ El editor analiza un video de referencia y detecta:
 Todo se guarda **en beats**, no en segundos. Así el estilo se adapta al tempo de
 cualquier canción. Al aplicarlo:
 
-- cada corte cae en el beat equivalente de la nueva canción;
+- cada corte cae en el beat equivalente de la nueva canción (en los slides y en la
+  persona que entra, lo que cae en el beat es el aterrizaje);
 - tus clips con más movimiento van donde la referencia tenía los planos más movidos
   (desactívalo con *Respetar mi orden*);
 - si tienes más clips que la referencia, se repite el "cuerpo" del edit; si tienes
@@ -113,11 +147,14 @@ Opciones útiles de `auto`:
 - `--style NOMBRE` estilo aprendido, o `--template gym_stack|beat_cuts` (plantillas fijas)
 - `--duration 15` duración máxima · `--music-start 32.5` empezar la canción en el drop
 - `--keep-order` respetar el orden de los clips · `--color-strength 0.8`
-- `--grade night_blue|teal_orange|moody|warm|cold|bw|vivid|faded|none`
+- `--grade night_blue|teal_orange|moody|warm|cold|bw|vivid|faded|film|none`
+- `--cinematic` halo en las luces y grano · `--no-sfx` sin efectos de sonido
+- `--no-music-follow` no adaptar a la canción · `--no-accents` sin zooms/flashes automáticos
 
 ### Otras utilidades
 
 ```bash
+python -m videoeditor music cancion.mp3   # secciones, drop, energía y golpes
 python -m videoeditor beats cancion.mp3   # BPM y tiempos de cada beat
 python -m videoeditor list                # looks, efectos y transiciones disponibles
 ```
@@ -135,6 +172,9 @@ relativas al archivo JSON.
   "lut":    "mi_look.cube",          // opcional, LUT 3D
   "color_match": {"r": [...], "g": [...], "b": [...]},  // look aprendido (lo rellena un estilo)
   "color_strength": 0.8,
+  "sound_design": true,              // efectos de sonido automáticos según el montaje
+  "sfx": [{"type": "impact", "at": 3.9, "volume": 0.7}],  // y/o manuales: whoosh, impact, riser, hit, glitch
+  "motion_blur": true,               // desenfoque de movimiento en slides/zooms
   "segments": [
     {"type": "black", "duration": 0.5},
 
@@ -148,6 +188,7 @@ relativas al archivo JSON.
      "in": 2.0,            // segundo del clip donde empieza
      "duration": 2.0,      // duración en el edit
      "speed": 1.0,         // 0.5 = cámara lenta
+     "ramp": [[1.0, 0.3], [1.8, 1.0]],  // rampa: a x0.3 en el segundo 1.0 y vuelta a x1 en 1.8
      "zoom": 1.0,          // >1 recorta más
      "focus": [0.5, 0.5],  // punto del encuadre a conservar (x, y)
      "mirror": false, "reverse": false,
@@ -174,6 +215,9 @@ donde dice el JSON, así los cortes siguen cayendo en el beat.
 | `flash`     | `times` [s], `amount`, `decay`                   | Destello blanco |
 | `rgb_split` | `amount`, `at`, `duration`                       | Separación de canales RGB |
 | `fade_in` / `fade_out` | `duration`, `color`                   | Fundido |
+| `halation`  | `amount`                                         | Halo rojizo en las luces fuertes (película) |
+| `film_grain`| `amount`                                         | Grano de película |
+| `stabilize` | —                                                | Estabiliza la cámara (vidstab, dos pasadas) |
 | `blur`, `grain`, `sharpen`, `letterbox` | `amount` / `size`        | Varios |
 
 ### Transiciones
@@ -184,31 +228,51 @@ donde dice el JSON, así los cortes siguen cayendo en el beat.
 `subject_drop` (la persona del plano siguiente, recortada del fondo, entra sobre el
 plano actual; `direction`: `top`, `bottom`, `left` o `right`).
 
+## Calidad: sin fallos
+
+Cada render pasa por una revisión automática:
+
+- **Antes**: si un clip es más corto que su hueco, mueve el punto de entrada o lo
+  ralentiza un poco en vez de congelar la imagen; los clips **HDR del iPhone** se
+  convierten a SDR con mapeo de tonos (si no, salen lavados); la música se normaliza
+  a **-14 LUFS** (volumen estándar de redes) y un limitador evita que sature.
+- **Después**: avisa de imágenes congeladas o negros no previstos, cortes fuera del
+  beat, audio saturado o con volumen raro y diferencias de duración.
+- El punto de entrada automático de cada clip busca la repetición con más movimiento
+  y descarta tramos borrosos o de cámara moviéndose.
+
 ## Estructura del código
 
 ```
 videoeditor/
   project.py   modelo y validación del JSON
-  render.py    render por segmentos + unión con concat/xfade + música
+  render.py    render por segmentos + unión con concat/xfade + música y sonido
   effects.py   looks de color y efectos (filtros de FFmpeg)
-  beats.py     detección de tempo y beats (numpy)
+  beats.py     tempo y beats (búsqueda global de la rejilla)
+  music.py     mapa musical: secciones, drop, energía, golpes
   auto.py      plantillas fijas y elección del mejor tramo de cada clip
   analyze.py   análisis de videos de referencia (cortes, transiciones, efectos, color)
-  style.py     aprender estilos y aplicarlos a clips + canción nuevos
+  motionfx.py  zooms de golpe, temblores, cámara lenta y textos
+  style.py     aprender estilos y aplicarlos guiado por la música
+  sfx.py       efectos de sonido sintetizados y su colocación
+  qa.py        revisión de calidad antes y después del render
   segment.py   recorte de personas con MediaPipe
   server.py    servidor de la interfaz web
   web/         interfaz web (HTML/CSS/JS sin dependencias)
   styles/      estilos incluidos
   __main__.py  línea de comandos
-tests/         tests de extremo a extremo con clips sintéticos
+tests/         tests de extremo a extremo con clips y canciones sintéticas
 ```
 
 Tests: `python -m unittest discover -s tests -v`
 
 ## Limitaciones
 
-- El analizador todavía no detecta zooms de golpe, temblores de cámara, cambios de
-  velocidad (cámara lenta) ni textos de la referencia. Se pueden añadir a mano en el editor.
+- La cámara lenta sólo se reconoce cuando hay velocidad normal antes y después (rampa);
+  un plano entero a cámara lenta no se distingue de un movimiento lento.
+- Con textos fijos encima, los temblores de cámara pequeños pueden pasar desapercibidos.
+- Las secciones de la canción se detectan bien en música con estructura clara (pop, EDM,
+  trap, phonk); en canciones muy uniformes todo cuenta como una sola sección.
 - El recorte de personas funciona mejor con una sola persona y buena iluminación. En
   planos muy oscuros el borde puede quedar irregular.
 - Sólo suena la música; el audio original de los clips no se mezcla.

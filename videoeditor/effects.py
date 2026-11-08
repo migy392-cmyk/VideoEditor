@@ -35,6 +35,12 @@ GRADES: dict[str, str] = {
     "bw": "hue=s=0,eq=contrast=1.25:brightness=-0.02",
     "vivid": "eq=contrast=1.08:saturation=1.35",
     "faded": "eq=contrast=0.9:brightness=0.03:saturation=0.8,curves=all='0/0.06 1/0.94'",
+    # Cine: curva en S suave, negros levantados, sombras frías y altas luces cálidas, algo menos de saturación
+    "film": (
+        "curves=all='0/0.045 0.25/0.26 0.5/0.53 0.75/0.79 1/0.96',"
+        "colorbalance=rs=-0.02:bs=0.03:rh=0.04:gh=0.015:bh=-0.03,"
+        "eq=saturation=0.9,vignette=angle=PI/7"
+    ),
 }
 
 
@@ -196,6 +202,32 @@ def fx_letterbox(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[st
     ]
 
 
+_HAL = [0]
+
+
+def fx_halation(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Halo rojizo alrededor de las luces fuertes, como en la película. Parámetro: amount (0.35)."""
+    amt = float(e.get("amount", 0.35))
+    _HAL[0] += 1
+    k = _HAL[0]
+    sigma = max(4, int(min(w, h) * 0.012))
+    # la mezcla "screen" debe hacerse en RGB (en YUV tiñe la imagen de morado)
+    return [f"format=gbrp,split[hal{k}a][hal{k}b];[hal{k}b]curves=all='0/0 0.72/0 1/1',gblur=sigma={sigma},"
+            f"colorchannelmixer=rr=1:gg=0.35:bb=0.15[hal{k}c];[hal{k}a][hal{k}c]blend=all_mode=screen:all_opacity={amt}",
+            "format=yuv420p"]
+
+
+def fx_film_grain(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Grano de película (cambia cada fotograma, más visible en medios tonos). Parámetro: amount (12)."""
+    amt = int(e.get("amount", 12))
+    return [f"noise=c0s={amt}:c0f=t+u"]
+
+
+def fx_stabilize(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Estabiliza la cámara (se resuelve en el render con vidstab en dos pasadas)."""
+    return []
+
+
 EffectFn = Callable[[Effect, float, int, int, int], list[str]]
 
 EFFECTS: dict[str, EffectFn] = {
@@ -210,6 +242,9 @@ EFFECTS: dict[str, EffectFn] = {
     "grain": fx_grain,
     "sharpen": fx_sharpen,
     "letterbox": fx_letterbox,
+    "halation": fx_halation,
+    "film_grain": fx_film_grain,
+    "stabilize": fx_stabilize,
 }
 
 

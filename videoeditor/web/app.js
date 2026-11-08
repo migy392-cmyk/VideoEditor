@@ -56,7 +56,7 @@ function watchJob(id, box, onDone) {
 
 // ------------------------------------------------------------------ estado
 const S = { meta: null, lib: { clips: [], music: [], references: [], renders: [] }, styles: [],
-  project: null, pname: null, sel: -1, dirty: false, order: [] };
+  project: null, pname: null, sel: -1, dirty: false, order: [], history: [], future: [], lastSnap: null };
 
 function setStatus() {
   const m = S.meta;
@@ -269,6 +269,8 @@ $("#create-btn").addEventListener("click", async () => {
     music_start: $("#create-start").value === "" ? null : parseFloat($("#create-start").value),
     follow_music: $("#create-follow").checked,
     accents: $("#create-accents").checked,
+    sound_design: $("#create-sfx").checked,
+    cinematic: $("#create-cine").checked,
     duration: parseFloat($("#create-duration").value) || null,
     color_strength: parseFloat($("#create-color").value),
     keep_order: $("#create-order").checked,
@@ -306,6 +308,8 @@ async function openProject(name) {
   S.pname = name;
   S.project = await api(`/api/projects/${enc(name)}`);
   S.sel = -1;
+  resetHistory();
+  showQA(null);
   setDirty(false);
   if (!S.project.info?.beats && S.project.music?.src) {
     try {
@@ -327,7 +331,40 @@ function loadPlayer(file) {
 }
 
 function setDirty(d) { S.dirty = d; $("#dirty").textContent = d ? "● cambios sin guardar" : ""; }
-function changed() { setDirty(true); drawTimeline(); }
+function changed() {
+  const snap = JSON.stringify(S.project);
+  if (S.lastSnap && snap !== S.lastSnap) { S.history.push(S.lastSnap); if (S.history.length > 200) S.history.shift(); S.future = []; }
+  S.lastSnap = snap;
+  setDirty(true); drawTimeline();
+}
+function resetHistory() { S.history = []; S.future = []; S.lastSnap = JSON.stringify(S.project); }
+function restore(snap) {
+  S.project = JSON.parse(snap); S.lastSnap = snap;
+  if (S.sel >= segs().length) S.sel = segs().length - 1;
+  setDirty(true); drawProjectForm(); drawTimeline(); drawInspector();
+}
+function undo() { if (!S.history.length) return toast("Nada que deshacer"); S.future.push(S.lastSnap); restore(S.history.pop()); }
+function redo() { if (!S.future.length) return toast("Nada que rehacer"); S.history.push(S.lastSnap); restore(S.future.pop()); }
+$("#undo-btn").addEventListener("click", undo);
+$("#redo-btn").addEventListener("click", redo);
+document.addEventListener("keydown", (e) => {
+  if (!$("#view-editor").classList.contains("active") || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName)) return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((e.ctrlKey || e.metaKey) && (k === "y" || (k === "z" && e.shiftKey))) { e.preventDefault(); redo(); }
+});
+
+function showQA(qa) {
+  const box = $("#qa-box");
+  box.innerHTML = "";
+  if (!qa) return;
+  const items = [...(qa.preflight || []).map((w) => "Corregido: " + w), ...((qa.check || {}).issues || [])];
+  const st = (qa.check || {}).stats || {};
+  const info = [st.duration != null ? `${st.duration}s` : "", st.lufs != null ? `${st.lufs} LUFS` : ""].filter(Boolean).join(" · ");
+  box.append(items.length
+    ? h("div", { class: "qa warn" }, h("b", {}, "Revisión de calidad"), info ? ` (${info})` : "", h("ul", {}, items.map((i) => h("li", {}, i))))
+    : h("div", { class: "qa ok" }, "✓ Revisión de calidad: sin problemas", info ? ` (${info})` : ""));
+}
 
 const segs = () => S.project.segments;
 const starts = () => { let t = 0; return segs().map((s) => { const a = t; t += Number(s.duration) || 0; return a; }); };
@@ -367,12 +404,16 @@ function drawProjectForm() {
   f.innerHTML = "";
   p.output = p.output || {};
   p.music = p.music || {};
+  if (p.motion_blur === undefined) p.motion_blur = true;
   f.append(
     field("Look de color", p, "grade", "select", { options: S.meta.grades }),
     p.color_match ? field("Copiar color aprendido (0-1)", p, "color_strength", "number", { step: "0.05", min: 0, max: 1 }) : null,
     field("Canción", p.music, "src", "select", { options: S.lib.music.map((m) => `../music/${m.name}`), empty: "(sin música)" }),
     field("Canción: empieza en (s)", p.music, "start", "number", { step: "0.1" }),
     field("Volumen", p.music, "volume", "number", { step: "0.1", min: 0 }),
+    field("Efectos de sonido automáticos", p, "sound_design", "checkbox"),
+    field("Volumen efectos de sonido", p, "sfx_volume", "number", { step: "0.1", min: 0, placeholder: "1" }),
+    field("Desenfoque de movimiento en transiciones", p, "motion_blur", "checkbox"),
     field("Ancho", p.output, "width", "number", { step: "2" }),
     field("Alto", p.output, "height", "number", { step: "2" }),
     field("FPS", p.output, "fps", "number", { step: "1" }),
@@ -557,6 +598,7 @@ async function doRender(preview) {
     watchJob(job, $("#render-job"), async (r) => {
       S.lib = await api("/api/library");
       loadPlayer(r.output);
+      showQA(r.qa);
       $("#player").play().catch(() => {});
       toast(`Render listo: ${r.output}`);
     });

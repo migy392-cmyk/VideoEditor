@@ -72,9 +72,29 @@ def _nested(pieces: list[tuple[float, float, float]]) -> str:
     return out
 
 
+def _hdr_transfer(path: str) -> str | None:
+    from .qa import HDR_TRANSFERS
+
+    try:
+        for st in ff.probe(path).get("streams", []):
+            if st.get("codec_type") == "video":
+                t = st.get("color_transfer")
+                return t if t in HDR_TRANSFERS else None
+    except ff.FFmpegError:
+        return None
+    return None
+
+
 def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str]:
     """Filtros que convierten un input (ya recortado con -ss/-t) en un plano de w x h y `dur` segundos."""
     chain = []
+    trc = _hdr_transfer(src.src)
+    if trc:  # HDR (iPhone): a SDR con mapeo de tonos, si no se ve lavado/gris
+        chain += [f"zscale=tin={trc}:min=bt2020nc:pin=bt2020:t=linear:npl=100", "format=gbrpf32le",
+                  "zscale=p=bt709", "tonemap=tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:r=tv",
+                  "format=yuv420p"]
+    if src.stabilize:
+        chain.append(f"vidstabtransform=input='{src.stabilize}':smoothing=12:zoom=4:optzoom=0:interpol=bilinear")
     if src.reverse:
         chain.append("reverse")
     if src.ramp and not src.reverse:
@@ -185,6 +205,12 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
     inputs: list[str] = []
     graph: list[str] = []
 
+    if any(e.type == "stabilize" for e in seg.effects) and seg.source:
+        trf = os.path.join(tmpdir, f"stab_{tag}.trf")
+        ff.run([*_source_input(seg.source, dur), "-vf", f"vidstabdetect=shakiness=7:accuracy=12:result='{trf}'",
+                "-f", "null", "-"])
+        seg = replace(seg, source=replace(seg.source, stabilize=trf))
+
     if seg.type in ("black", "color"):
         color = "black" if seg.type == "black" else seg.color
         inputs += ["-f", "lavfi", "-i", f"color=c={color}:s={w}x{h}:r={fps}:d={dur:.4f}"]
@@ -276,20 +302,57 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
         cur = nxt
 
     total = project.total_duration
-    graph.append(f"[{cur}]trim=duration={total:.4f},setpts=PTS-STARTPTS[vout]")
+    post = []
+    if project.motion_blur:
+        from .sfx import MOVING
+
+        wins = [(starts[i], starts[i] + segs[i].transition.duration) for i in range(1, len(segs))
+                if segs[i].transition.type in MOVING and segs[i].transition.duration > 0]
+        if wins:  # mezcla de fotogramas vecinos = desenfoque de movimiento durante la transición
+            en = "+".join(f"between(t\\,{a:.4f}\\,{b:.4f})" for a, b in wins)
+            post.append(f"tmix=frames=3:weights='1 2 1':enable='{en}'")
+    post += [f"trim=duration={total:.4f}", "setpts=PTS-STARTPTS"]
+    graph.append(f"[{cur}]" + ",".join(post) + "[vout]")
     maps = ["-map", "[vout]"]
 
+    n_in = len(seg_files) + len(cutouts)
+    music_label = None
     m = project.music
     if m:
-        ai = len(seg_files) + len(cutouts)
+        ai = n_in
+        n_in += 1
         inputs += ["-ss", f"{m.start:.4f}", "-i", m.src]
-        af = [f"atrim=duration={total:.4f}", "asetpts=PTS-STARTPTS", f"volume={m.volume}",
-              f"apad=whole_dur={total:.4f}"]
+        af = [f"atrim=duration={total:.4f}", "asetpts=PTS-STARTPTS"]
+        if m.normalize:  # volumen estándar para redes (-14 LUFS) sin saturar
+            af.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+        af += [f"volume={m.volume}", f"apad=whole_dur={total:.4f}"]
         if m.fade_in > 0:
             af.append(f"afade=t=in:st=0:d={m.fade_in}")
         if m.fade_out > 0:
             af.append(f"afade=t=out:st={max(0.0, total - m.fade_out):.4f}:d={m.fade_out}")
-        graph.append(f"[{ai}:a]" + ",".join(af) + "[aout]")
+        graph.append(f"[{ai}:a]" + ",".join(af) + ",aformat=sample_rates=44100:channel_layouts=stereo[amus]")
+        music_label = "amus"
+
+    cues = _sfx_cues(project)
+    sfx_labels = []
+    for k, c in enumerate(cues):
+        from .sfx import sample
+
+        inputs += ["-i", sample(c["type"], c.get("duration"))]
+        ms = int(c["at"] * 1000)
+        vol = c.get("volume", 0.6) * project.sfx_volume
+        graph.append(f"[{n_in}:a]aformat=sample_rates=44100:channel_layouts=stereo,volume={vol:.3f},"
+                     f"adelay={ms}|{ms}[sx{k}]")
+        sfx_labels.append(f"sx{k}")
+        n_in += 1
+    if music_label or sfx_labels:
+        labels = ([music_label] if music_label else []) + sfx_labels
+        if len(labels) == 1:
+            graph.append(f"[{labels[0]}]atrim=duration={total:.4f},apad=whole_dur={total:.4f}[aout]")
+        else:
+            graph.append("".join(f"[{l_}]" for l_ in labels) +
+                         f"amix=inputs={len(labels)}:duration=first:normalize=0,"
+                         f"alimiter=limit=0.79:level=0,atrim=duration={total:.4f},apad=whole_dur={total:.4f}[aout]")
         maps += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
 
     return [
@@ -302,6 +365,16 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
         "-t", f"{total:.4f}",
         out_path,
     ]
+
+
+def _sfx_cues(project: Project) -> list[dict]:
+    from .sfx import auto_cues
+
+    cues = list(project.sfx or [])
+    if project.sound_design:
+        cues += auto_cues(project, project.drop)
+    total = project.total_duration
+    return [c for c in cues if c["at"] < total - 0.05]
 
 
 def preview_project(project: Project, scale: float = 0.5) -> Project:
@@ -339,9 +412,19 @@ def _make_cutouts(project: Project, tmpdir: str, log) -> dict[int, str]:
 
 
 def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp: bool = False,
-           log=print) -> str:
+           log=print, qa: bool = True, report: dict | None = None) -> str:
+    """Renderiza el proyecto. Con `qa`, antes corrige lo que pueda (clips cortos…) y
+    después revisa el resultado; los avisos van al log y a `report` si se pasa."""
+    from . import qa as qa_mod
+
     ff.require_ffmpeg()
     t0 = time.time()
+    if qa:
+        project, warns = qa_mod.preflight(project)
+        for w_ in warns:
+            log(f"  ⚠ {w_}")
+        if report is not None:
+            report["preflight"] = warns
     tmpdir = tempfile.mkdtemp(prefix="videoeditor_")
     try:
         segs = project.segments
@@ -360,6 +443,14 @@ def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         ff.run(build_assemble_command(project, seg_files, durs, out_path, cutouts), verbose=verbose)
         log(f"  Listo en {time.time() - t0:.1f}s → {out_path}")
+        if qa:
+            res = qa_mod.check_output(out_path, project, beats=getattr(project, "beats", None))
+            if report is not None:
+                report["check"] = res
+            if res["ok"]:
+                log("  ✓ Revisión: sin problemas" + (f" · {res['stats'].get('lufs')} LUFS" if "lufs" in res["stats"] else ""))
+            for i_ in res["issues"]:
+                log(f"  ⚠ {i_}")
         return out_path
     finally:
         if keep_temp:

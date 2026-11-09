@@ -189,7 +189,8 @@ for (const panel of $$("#view-library .panel[data-kind]")) {
 // ------------------------------------------------------------------ estilos
 const TYPE_COLOR = { clip: "var(--c-clip)", stack: "var(--c-stack)", black: "var(--c-black)", color: "var(--c-color)" };
 const TR_LABEL = { cut: "corte", fade: "disolución", fadeblack: "fundido a negro", flash: "flash",
-  subject_drop: "persona entra", slidedown: "slide ↓", slideup: "slide ↑", slideleft: "slide ←", slideright: "slide →" };
+  subject_drop: "persona entra", slidedown: "slide ↓", slideup: "slide ↑", slideleft: "slide ←", slideright: "slide →",
+  zoomthrough: "zoom a través del corte", whip: "barrido" };
 
 function recipeBar(sections) {
   const total = sections.reduce((a, s) => a + (s.beats || 1), 0);
@@ -539,6 +540,8 @@ const EFFECT_DEFAULTS = {
   glitch: { at: "end", duration: 0.6 }, punch: { times: [0], amount: 0.1 }, shake: { at: 0, duration: 0.5, amount: 0.5 },
   flash: { times: [0], amount: 0.7 }, rgb_split: { amount: 8 }, fade_in: { duration: 0.4 }, fade_out: { duration: 0.4 },
   blur: { amount: 12 }, grain: { amount: 10 }, sharpen: { amount: 0.8 }, letterbox: { size: 0.08 },
+  freeze: { at: 0.5, duration: 0.5 }, strobe: { at: 0, duration: 1, rate: 8, amount: 1 },
+  bw_flash: { times: [0], duration: 0.12 },
 };
 
 function drawInspector() {
@@ -569,7 +572,8 @@ function drawInspector() {
   }
   if (s.type === "stack") {
     s.panels = s.panels || [];
-    const pbox = h("div", { class: "sub" }, h("h3", {}, "Paneles (de arriba a abajo)"));
+    const pbox = h("div", { class: "sub" }, h("h3", {}, s.layout === "columns" ? "Paneles (de izquierda a derecha)"
+      : s.layout === "grid" ? "Paneles (cuadrícula, fila a fila)" : "Paneles (de arriba a abajo)"));
     s.panels.forEach((p, k) => pbox.append(h("div", { class: "row" },
       h("img", { class: "preview", style: "height:60px", src: `/api/thumb/clips/${enc(base(p.src))}?t=${round((p.in || 0) + 0.1, 2)}` }),
       h("div", { class: "form", style: "flex:1" },
@@ -578,7 +582,9 @@ function drawInspector() {
         field("Aparece en", p, "appear", "number", { min: 0 })),
       h("button", { class: "danger", onclick: () => { s.panels.splice(k, 1); changed(); drawInspector(); } }, "✕"))));
     pbox.append(h("button", { onclick: () => { s.panels.push({ src: clipOptions()[0], in: 0, appear: 0 }); changed(); drawInspector(); } }, "+ Panel"));
-    box.append(h("div", { class: "form" }, field("Separación (px)", s, "gap", "number", { step: "1", min: 0 })), pbox);
+    box.append(h("div", { class: "form" }, field("Separación (px)", s, "gap", "number", { step: "1", min: 0 }),
+      field("Distribución", s, "layout", "select", { options: S.meta.layouts || ["rows", "columns", "grid"],
+        def: "rows", labels: (o) => ({ rows: "franjas", columns: "columnas", grid: "cuadrícula" })[o] || o, redraw: true })), pbox);
   }
   if (s.type === "color") box.append(h("div", { class: "form" }, field("Color", s, "color", "color")));
 
@@ -588,7 +594,8 @@ function drawInspector() {
     box.append(h("div", { class: "sub" }, h("h3", {}, "Transición de entrada"), h("div", { class: "form" },
       field("Tipo", t, "type", "select", { options: S.meta.transitions, labels: (o) => TR_LABEL[o] ? `${TR_LABEL[o]} (${o})` : o, redraw: true }),
       t.type !== "cut" ? field("Duración (s)", t, "duration", "number", { step: "0.05", min: 0.05, placeholder: "0.3" }) : null,
-      t.type === "subject_drop" ? field("Desde", t, "direction", "select", { options: S.meta.directions }) : null),
+      t.type === "subject_drop" ? field("Desde", t, "direction", "select", { options: S.meta.directions }) : null,
+      t.type === "whip" ? field("Hacia", t, "direction", "select", { options: S.meta.directions, def: "left" }) : null),
       t.type === "subject_drop" && !S.meta.segmentation ? h("p", { class: "muted" }, "Sin MediaPipe se usará un slide normal.") : null));
   }
 

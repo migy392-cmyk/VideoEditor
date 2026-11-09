@@ -121,6 +121,51 @@ def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str
     return chain
 
 
+def panel_boxes(seg: Segment, w: int, h: int) -> list[tuple[int, int, int, int]]:
+    """Posición y tamaño (x, y, ancho, alto) de cada panel de un 'stack' según su `layout`:
+    rows = franjas horizontales de arriba a abajo, columns = columnas de izquierda a derecha,
+    grid = cuadrícula de 2 columnas (de izquierda a derecha y de arriba a abajo)."""
+    n, g = len(seg.panels), seg.gap
+    out = []
+    if seg.layout == "columns":
+        pw = _even((w - g * (n - 1)) / n)
+        for i in range(n):
+            out.append((i * (pw + g) if i < n - 1 else w - pw, 0, pw, h))
+    elif seg.layout == "grid":
+        cols, rows = 2, (n + 1) // 2
+        pw = _even((w - g) / 2)
+        ph = _even((h - g * (rows - 1)) / rows)
+        for i in range(n):
+            r, c = divmod(i, cols)
+            out.append((0 if c == 0 else w - pw, r * (ph + g) if r < rows - 1 else h - ph, pw, ph))
+    else:
+        ph = _even((h - g * (n - 1)) / n)
+        for i in range(n):
+            out.append((0, i * (ph + g) if i < n - 1 else h - ph, w, ph))
+    return out
+
+
+def expand_transitions(project: Project) -> Project:
+    """Las transiciones centradas en el corte (zoomthrough, whip) se convierten en efectos:
+    la mitad de salida al final del segmento anterior y la de entrada al principio del siguiente."""
+    from .project import Effect
+
+    segs = list(project.segments)
+    for i in range(1, len(segs)):
+        tr = segs[i].transition
+        if not tr.centered or tr.duration <= 0:
+            continue
+        half = round(tr.duration / 2, 4)
+        kind = "tr_zoom" if tr.type == "zoomthrough" else "tr_whip"
+        params = {"duration": half}
+        if kind == "tr_whip":
+            params["direction"] = tr.direction
+        # la salida va al final (después de los efectos del plano); la entrada, antes que todos
+        segs[i - 1] = replace(segs[i - 1], effects=segs[i - 1].effects + [Effect(kind, {**params, "phase": "out"})])
+        segs[i] = replace(segs[i], effects=[Effect(kind, {**params, "phase": "in"})] + segs[i].effects)
+    return replace(project, segments=segs)
+
+
 def _source_input(src: Source, dur: float) -> list[str]:
     need = source_length(src, dur) + 0.25
     return ["-ss", f"{src.inpoint:.4f}", "-t", f"{need:.4f}", "-i", src.src]
@@ -230,21 +275,18 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
         look = _look(project, seg, seg.source, dur)
         graph.append("[0:v]" + ",".join(_source_chain(seg.source, dur, w, h, fps) + look) + "[base]")
     elif seg.type == "stack":
-        n = len(seg.panels)
-        ph = _even((h - seg.gap * (n - 1)) / n)
         inputs += ["-f", "lavfi", "-i", f"color=c={seg.color}:s={w}x{h}:r={fps}:d={dur:.4f}"]
         prev = "0:v"
-        for i, p in enumerate(seg.panels):
+        for i, (p, (x, y, pw, ph)) in enumerate(zip(seg.panels, panel_boxes(seg, w, h))):
             appear = min(p.appear, dur)
             pdur = max(0.05, dur - appear)
             inputs += _source_input(p, pdur)
             # El look se aplica a cada panel para no teñir el fondo/gaps.
-            chain = _source_chain(p, pdur, w, ph, fps) + _look(project, seg, p, pdur)
+            chain = _source_chain(p, pdur, pw, ph, fps) + _look(project, seg, p, pdur)
             chain.append(f"setpts=PTS+{appear:.4f}/TB")
             graph.append(f"[{i + 1}:v]" + ",".join(chain) + f"[p{i}]")
-            y = i * (ph + seg.gap) if i < n - 1 else h - ph
             label = f"s{i}"
-            graph.append(f"[{prev}][p{i}]overlay=x=0:y={y}:eof_action=pass:repeatlast=0[{label}]")
+            graph.append(f"[{prev}][p{i}]overlay=x={x}:y={y}:eof_action=pass:repeatlast=0[{label}]")
             prev = label
         graph.append(f"[{prev}]null[base]")
     else:  # pragma: no cover - validado en project.py
@@ -316,11 +358,22 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
     if project.motion_blur:
         from .sfx import MOVING
 
-        wins = [(starts[i], starts[i] + segs[i].transition.duration) for i in range(1, len(segs))
-                if segs[i].transition.type in MOVING and segs[i].transition.duration > 0]
+        wins = []
+        for i in range(1, len(segs)):
+            tr = segs[i].transition
+            if tr.type in MOVING and tr.duration > 0:
+                a = starts[i] - (tr.duration / 2 if tr.centered else 0.0)
+                wins.append((max(0.0, a), a + tr.duration))
         if wins:  # mezcla de fotogramas vecinos = desenfoque de movimiento durante la transición
             en = "+".join(f"between(t\\,{a:.4f}\\,{b:.4f})" for a, b in wins)
-            post.append(f"tmix=frames=3:weights='1 2 1':enable='{en}'")
+            # tmix con `enable` retrasa todo el video 2 fotogramas (y 1 dentro de la ventana): se
+            # mezcla una copia, se centra (fotograma k = mezcla de k-1, k, k+1) y se superpone
+            # sólo durante las transiciones, sin desplazar nada.
+            # (marcas de tiempo idénticas en las dos ramas, si no overlay repite fotogramas)
+            graph.append(f"[{cur}]setpts=N/({o.fps}*TB),split[mb0][mb1]")
+            graph.append(f"[mb1]tmix=frames=3:weights='1 2 1',trim=start_frame=1,setpts=N/({o.fps}*TB)[mb2]")
+            graph.append(f"[mb0][mb2]overlay=eof_action=pass:enable='{en}'[mbo]")
+            cur = "mbo"
     post += [f"trim=duration={total:.4f}", "setpts=PTS-STARTPTS"]
     graph.append(f"[{cur}]" + ",".join(post) + "[vout]")
     maps = ["-map", "[vout]"]
@@ -437,10 +490,11 @@ def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp:
             report["preflight"] = warns
     tmpdir = tempfile.mkdtemp(prefix="videoeditor_")
     try:
+        project = expand_transitions(project)
         segs = project.segments
         seg_files, durs = [], []
         for i, seg in enumerate(segs):
-            tail = segs[i + 1].transition.duration if i + 1 < len(segs) else 0.0
+            tail = segs[i + 1].transition.overlap if i + 1 < len(segs) else 0.0
             dur = seg.duration + tail
             path = os.path.join(tmpdir, f"seg_{i:03d}.mp4")
             log(f"  [{i + 1}/{len(segs)}] {seg.type:<5} {seg.duration:6.2f}s"

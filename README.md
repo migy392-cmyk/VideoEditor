@@ -98,6 +98,13 @@ El editor analiza un video de referencia y detecta:
 | Temblor de cámara | sacudidas rápidas de ida y vuelta de la imagen |
 | Cámara lenta / rampa de velocidad | el movimiento cae mucho dentro de un plano y luego se recupera |
 | Textos sobreimpresos (y qué dicen) | zona fija y muy contrastada + OCR con tesseract |
+| Pantalla dividida en **columnas** o en **cuadrícula** 2×2 (paneles que van apareciendo) | zonas negras de verdad que se van encendiendo, por columnas o por cuadrantes |
+| **Imagen congelada** (freeze) | varios fotogramas idénticos (≥ 0.2 s) con movimiento antes y después; no se confunde con la repetición de fotogramas de una cámara lenta |
+| **Estroboscopio** / parpadeo al ritmo, a negro o a blanco | al menos 3 pulsos de brillo regulares sobre la misma imagen; se guarda su ritmo |
+| Planos en **blanco y negro** o **desaturados** | saturación de cada plano comparada con la del resto del video |
+| **Destellos en blanco y negro** de unos fotogramas | el color desaparece un instante en mitad de un plano en color |
+| **Zoom a través del corte** | el zoom acelera hasta el corte y el plano nuevo entra ampliado y se asienta (escala medida fotograma a fotograma) |
+| **Barrido** (whip pan) y su dirección | desenfoque direccional a los dos lados del corte + desplazamiento muy rápido en un solo sentido |
 | Barras de cine | filas siempre negras arriba y abajo |
 | Cuánto movimiento tiene cada plano | energía de movimiento |
 | Look de color | distribución de color (cuantiles RGB) |
@@ -106,7 +113,13 @@ Todo se guarda **en beats**, no en segundos. Así el estilo se adapta al tempo d
 cualquier canción. Al aplicarlo:
 
 - cada corte cae en el beat equivalente de la nueva canción (en los slides y en la
-  persona que entra, lo que cae en el beat es el aterrizaje);
+  persona que entra, lo que cae en el beat es el aterrizaje; en el zoom a través del
+  corte y en el barrido, el propio corte);
+- las congelaciones, los estroboscopios y los destellos en blanco y negro caen en el mismo
+  beat del plano, y el ritmo del estroboscopio se guarda como subdivisión del beat
+  (1/4, 1/3, 1/2…), así parpadea a tempo con cualquier canción;
+- los planos en blanco y negro siguen en blanco y negro y los paneles conservan su
+  distribución (franjas, columnas o cuadrícula);
 - tus clips con más movimiento van donde la referencia tenía los planos más movidos
   (desactívalo con *Respetar mi orden*);
 - si tienes más clips que la referencia, se repite el "cuerpo" del edit; si tienes
@@ -228,7 +241,7 @@ Opciones útiles de `auto`:
 - `--style NOMBRE` estilo aprendido, o `--template gym_stack|beat_cuts` (plantillas fijas)
 - `--duration 15` duración máxima · `--music-start 32.5` empezar la canción en el drop
 - `--keep-order` respetar el orden de los clips · `--color-strength 0.8`
-- `--grade night_blue|teal_orange|moody|warm|cold|bw|vivid|faded|film|none`
+- `--grade night_blue|teal_orange|moody|warm|cold|bw|desaturated|vivid|faded|film|none`
 - `--lut ID` y `--lut-strength 0.8` LUT de color (ver [LUTs de color](#luts-de-color))
 - `--cinematic` halo en las luces y grano · `--no-sfx` sin efectos de sonido
 - `--no-music-follow` no adaptar a la canción · `--no-accents` sin zooms/flashes automáticos
@@ -261,7 +274,9 @@ relativas al archivo JSON.
   "segments": [
     {"type": "black", "duration": 0.5},
 
-    {"type": "stack", "duration": 3.0, "gap": 0, "panels": [
+    {"type": "stack", "duration": 3.0, "gap": 0,
+     "layout": "rows",     // rows (franjas, de arriba a abajo), columns (de izquierda a derecha) o grid (2 columnas)
+     "panels": [
       {"src": "a.mov", "in": 1.0, "appear": 0.0},   // "appear": segundo en que entra
       {"src": "b.mov", "in": 0.5, "appear": 1.0},
       {"src": "c.mov", "in": 0.0, "appear": 2.0}
@@ -301,15 +316,26 @@ donde dice el JSON, así los cortes siguen cayendo en el beat.
 | `halation`  | `amount`                                         | Halo rojizo en las luces fuertes (película) |
 | `film_grain`| `amount`                                         | Grano de película |
 | `stabilize` | —                                                | Estabiliza la cámara (vidstab, dos pasadas) |
+| `freeze`    | `at` [s], `duration`                             | Imagen congelada: se detiene en ese fotograma y luego el plano sigue desde ahí (combínalo con `flash` o `punch` en el mismo instante) |
+| `strobe`    | `at`, `duration`, `rate` (parpadeos/s), `amount` (0–1), `color` (`black`/`white`), `duty` | Estroboscopio: la imagen parpadea a ritmo fijo |
+| `bw_flash`  | `times` [s], `duration`                          | Unos fotogramas en blanco y negro (p. ej. en los beats) |
 | `blur`, `grain`, `sharpen`, `letterbox` | `amount` / `size`        | Varios |
 
 ### Transiciones
 
 `cut`, `fade`, `fadeblack`, `flash`, `slideleft/right/up/down`,
 `wipeleft/right/up/down`, `smoothleft/right/up/down`, `zoom`, `pixelize`,
-`dissolve`, `circleopen`, `radial`, `squeezeh`, `squeezev`, `hblur` y
+`dissolve`, `circleopen`, `radial`, `squeezeh`, `squeezev`, `hblur`,
 `subject_drop` (la persona del plano siguiente, recortada del fondo, entra sobre el
-plano actual; `direction`: `top`, `bottom`, `left` o `right`).
+plano actual; `direction`: `top`, `bottom`, `left` o `right`) y dos transiciones
+**centradas en el corte** (la mitad de su duración va al final del plano anterior y la
+otra mitad al principio del siguiente, así el corte sigue cayendo en el beat):
+
+- `zoomthrough`: zoom que acelera hacia el centro hasta el corte; el plano nuevo entra
+  ampliado y se asienta.
+- `whip`: barrido de cámara; la imagen sale disparada hacia `direction` (`left`, `right`,
+  `top` o `bottom`; por defecto `left`) con desenfoque direccional y el plano nuevo llega
+  igual de rápido. Con `sound_design` lleva un whoosh.
 
 ## Calidad: sin fallos
 
@@ -319,7 +345,8 @@ Cada render pasa por una revisión automática:
   ralentiza un poco en vez de congelar la imagen; los clips **HDR del iPhone** se
   convierten a SDR con mapeo de tonos (si no, salen lavados); la música se normaliza
   a **-14 LUFS** (volumen estándar de redes) y un limitador evita que sature.
-- **Después**: avisa de imágenes congeladas o negros no previstos, cortes fuera del
+- **Después**: avisa de imágenes congeladas o negros no previstos (las congelaciones del
+  efecto `freeze` y los parpadeos del estroboscopio sí están previstos), cortes fuera del
   beat, audio saturado o con volumen raro y diferencias de duración.
 - El punto de entrada automático de cada clip busca la repetición con más movimiento
   y descarta tramos borrosos o de cámara moviéndose.
@@ -361,3 +388,11 @@ Tests: `python -m unittest discover -s tests -v`
 - El recorte de personas funciona mejor con una sola persona y buena iluminación. En
   planos muy oscuros el borde puede quedar irregular.
 - Sólo suena la música; el audio original de los clips no se mezcla.
+- Un plano nocturno muy oscuro con la parte de arriba completamente negra puede
+  confundirse con paneles apilados (y entonces no se mira si va en blanco y negro).
+- El barrido se reconoce por el desenfoque direccional y el desplazamiento rapidísimo a
+  los dos lados del corte; un barrido real sin apenas desenfoque, o uno hacia arriba o
+  abajo sobre imágenes casi sin detalle vertical, puede quedarse en un corte seco.
+- La congelación necesita movimiento antes y después: en un plano casi fijo no se
+  distingue de la propia imagen quieta. El "color pop" (sólo un objeto en color) no se
+  detecta: cuenta como plano en color.

@@ -21,20 +21,64 @@ nocturno: sombras azuladas, luces cálidas, contraste alto.
 
 ## Instalación
 
-Hace falta **Python 3.10+** y **FFmpeg** (`ffmpeg` y `ffprobe` en el PATH).
+Hace falta **Python 3.10+** y **FFmpeg** (`ffmpeg` y `ffprobe` en el PATH) en su versión
+**completa ("full")**: necesita los filtros `zscale` (videos HDR de iPhone), `vidstab`
+(estabilización), `drawtext` (textos) y el codec `libx264`. Si falta alguno, el editor sigue
+funcionando y avisa de lo que se desactiva.
 
-```bash
+### Windows 10/11
+
+```powershell
+winget install Python.Python.3.12
+winget install Gyan.FFmpeg          # build "full"; alternativa: choco install ffmpeg-full
+# abre una terminal nueva para que se actualice el PATH
+cd VideoEditor
+py -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
+python -m videoeditor doctor        # comprueba que todo está bien
+python -m videoeditor serve         # abre el navegador solo
 ```
 
-`mediapipe` es opcional: sólo se usa para recortar a la persona (transición
-`subject_drop`). El modelo (~16 MB) se descarga solo la primera vez. Sin él, esa
-transición se convierte en un deslizamiento normal. En Linux, MediaPipe necesita
-además `libegl1` y `libgles2` (`apt-get install libegl1 libgles2`).
+Instalación manual de FFmpeg: descarga `ffmpeg-release-full.7z` de
+<https://www.gyan.dev/ffmpeg/builds/> (no la "essentials"), descomprímela y añade su carpeta
+`bin` al PATH.
 
-`tesseract` (opcional, `apt-get install tesseract-ocr tesseract-ocr-spa`) permite leer
-los textos de los videos de referencia. FFmpeg debe incluir `zscale` (HDR) y `vidstab`
-(estabilización); las versiones de Ubuntu/Debian y Homebrew los traen.
+### macOS
+
+```bash
+brew install python ffmpeg
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m videoeditor doctor
+python -m videoeditor serve
+```
+
+### Linux (Debian/Ubuntu)
+
+```bash
+sudo apt install python3 python3-venv ffmpeg
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m videoeditor doctor
+python -m videoeditor serve
+```
+
+### Opcional
+
+- `pip install -r requirements-extra.txt` instala **mediapipe**, que sólo se usa para recortar a
+  la persona (transición `subject_drop`). El modelo (~16 MB) se descarga solo la primera vez. Sin
+  él, esa transición se convierte en un deslizamiento normal. En Linux necesita además
+  `sudo apt install libegl1 libgles2`.
+- `tesseract` (macOS: `brew install tesseract tesseract-lang`; Linux: `apt install tesseract-ocr
+  tesseract-ocr-spa`; Windows: `winget install UB-Mannheim.TesseractOCR`) permite leer los textos
+  de los videos de referencia.
+- `pip install .` instala además el comando `videoeditor` (equivale a `python -m videoeditor`).
+
+`python -m videoeditor doctor` muestra una lista con lo que está instalado y, de lo que falte,
+cómo arreglarlo en tu sistema. Las cachés (LUTs, música analizada, efectos de sonido, modelo) van
+a `%LOCALAPPDATA%\videoeditor\Cache` (Windows), `~/Library/Caches/videoeditor` (macOS) o
+`~/.cache/videoeditor` (Linux); se puede cambiar con la variable `VIDEOEDITOR_CACHE`.
 
 ## Primero, la música
 
@@ -60,7 +104,7 @@ Y edita en función de ella:
 ## Interfaz web
 
 ```bash
-python -m videoeditor serve          # abre http://127.0.0.1:8765
+python -m videoeditor serve          # abre http://127.0.0.1:8765 en el navegador (--no-open para evitarlo)
 ```
 
 Todo se guarda en la carpeta `workspace/` (cámbiala con `-w otra_carpeta`).

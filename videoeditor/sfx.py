@@ -11,12 +11,14 @@ import wave
 
 import numpy as np
 
+from . import sysutil
+
 SR = 44100
 TYPES = ("whoosh", "impact", "riser", "hit", "glitch")
 
 
 def _cache_dir() -> str:
-    d = os.path.join(os.path.expanduser("~"), ".cache", "videoeditor", "sfx")
+    d = sysutil.cache_dir("sfx")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -86,7 +88,7 @@ def sample(kind: str, dur: float | None = None) -> str:
             w.setsampwidth(2)
             w.setframerate(SR)
             w.writeframes(stereo.tobytes())
-        os.replace(tmp, path)
+        sysutil.replace_file(tmp, path)
     return path
 
 

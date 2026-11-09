@@ -35,6 +35,8 @@ from typing import Callable
 
 import numpy as np
 
+from . import ff, sysutil
+
 SIZE = 33
 SHIPPED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "luts")
 LUT_EXT = (".cube", ".3dl", ".dat", ".m3d")
@@ -55,7 +57,7 @@ def set_workspace(path: str | None) -> None:
 
 
 def cache_dir() -> str:
-    d = os.environ.get("VIDEOEDITOR_LUT_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "videoeditor", "luts")
+    d = os.environ.get("VIDEOEDITOR_LUT_CACHE") or sysutil.cache_dir("luts")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -574,7 +576,7 @@ def _write_atomic(path: str, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".part")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
-    os.replace(tmp, path)
+    sysutil.replace_file(tmp, path)
 
 
 def preset_cube(look: Look, strength: float = 1.0) -> str:
@@ -729,16 +731,7 @@ def resolve(spec: str, strength: float = 1.0, base_dir: str | None = None) -> st
     return out
 
 
-def ff_escape(path: str) -> str:
-    """Ruta lista para el valor de una opción de filtro de ffmpeg (p. ej. `lut3d=file=...`).
-
-    La cadena se interpreta dos veces: primero como grafo de filtros (donde `\\`, `'`, `,`, `;`,
-    `[` y `]` son especiales) y luego como opciones del filtro (`\\`, `'` y `:`). Se escapa con
-    barra invertida en ambos niveles, de modo que valen rutas con espacios, comas, comillas,
-    corchetes o dos puntos (también `C:/...` en Windows)."""
-    p = path.replace("\\", "/")  # ffmpeg acepta / también en Windows
-    p = re.sub(r"([\\':])", r"\\\1", p)
-    return re.sub(r"([\\',;\[\]])", r"\\\1", p)
+ff_escape = ff.filter_value  # compatibilidad: el escapado vive en ff.py
 
 
 def lut_filter(spec: str | None, strength: float = 1.0, base_dir: str | None = None) -> str | None:
@@ -830,11 +823,16 @@ def contact_sheet(clip: str, out: str, at: float = 1.0, specs: list[tuple[str, s
             flt = lut_filter(spec, strength, base_dir) if spec and spec != "none" else None
             if flt:
                 chain.append(flt)
-            dt = [f"textfile='{tf}'", f"fontsize={max(12, w // 13)}", "fontcolor=white", "box=1",
+            dt = [f"textfile={ff.filter_value(tf)}", f"fontsize={max(12, w // 13)}", "fontcolor=white", "box=1",
                   "boxcolor=black@0.6", "boxborderw=6", "x=(w-text_w)/2", f"y=h-text_h-{max(10, h // 40)}"]
             if font:
-                dt.insert(1, f"fontfile='{font}'")
-            chain.append("drawtext=" + ":".join(dt))
+                dt.insert(1, f"fontfile={ff.filter_value(font)}")
+            if ff.has_filter("drawtext") or not ff.available_filters():
+                chain.append("drawtext=" + ":".join(dt))
+            else:
+                sysutil.warn_once("tu FFmpeg no tiene el filtro drawtext: la hoja de LUTs sale sin etiquetas.")
+            if not chain:
+                chain.append("null")
             graph.append(f"[f{i}]" + ",".join(chain) + f"[o{i}]")
         layout = "|".join(f"{(i % cols) * w}_{(i // cols) * h}" for i in range(n))
         graph.append("".join(f"[o{i}]" for i in range(n)) +

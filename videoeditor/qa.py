@@ -15,12 +15,13 @@ Después:
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import replace
 
 import numpy as np
 
-from . import ff
+from . import ff, sysutil
 from .effects import _window, freeze_windows
 from .project import Project, Source
 
@@ -84,7 +85,8 @@ def preflight(project: Project) -> tuple[Project, list[str]]:
             seg = replace(seg, panels=panels)
         segs.append(seg)
     for h in sorted(hdr_seen):
-        warn.append(f"{h.split('/')[-1]} es HDR (iPhone): se convierte a SDR con mapeo de tonos para que no salga lavado")
+        name = os.path.basename(h.replace("\\", "/"))
+        warn.append(f"{name} es HDR (iPhone): se convierte a SDR con mapeo de tonos para que no salga lavado")
     return replace(project, segments=segs), warn
 
 

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videoeditor"
+dynamic = ["version"]
+description = "Editor de video por proyectos JSON basado en FFmpeg"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+extra = ["mediapipe>=0.10"]
+
+[project.scripts]
+videoeditor = "videoeditor.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["videoeditor*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "videoeditor.__version__"}
+
+[tool.setuptools.package-data]
+videoeditor = ["web/*", "styles/*.json", "luts/*.cube"]

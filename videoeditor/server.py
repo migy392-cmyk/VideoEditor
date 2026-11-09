@@ -17,6 +17,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import sys
 import re
 import threading
 import time
@@ -26,8 +27,13 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import ff, luts
+from . import ff, luts, sysutil
 
+# En Windows mimetypes lee el registro y a veces da text/plain para .js: tipos fijos.
+MIME_FIXED = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+              ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json",
+              ".mp4": "video/mp4", ".m4a": "audio/mp4", ".mov": "video/quicktime", ".mp3": "audio/mpeg",
+              ".wav": "audio/wav", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 KINDS = ("clips", "music", "references", "luts")
 MEDIA_KINDS = KINDS + ("renders",)
@@ -148,7 +154,7 @@ class App:
             tmp = out + ".part.jpg"
             luts.preview_frame(src, t, tmp, None if spec == "none" else spec, strength, width=180,
                                base_dir=os.path.join(self.ws, "projects"))
-            os.replace(tmp, out)
+            sysutil.replace_file(tmp, out)
         return out
 
     def _lut_mtime(self, spec: str) -> float:
@@ -267,11 +273,11 @@ class App:
 
         cache = os.path.join(self.ws, "cache", re.sub(r"[^\w]", "_", f"beats_{music}_{start}_{duration}") + ".json")
         if os.path.exists(cache):
-            with open(cache) as f:
+            with open(cache, encoding="utf-8") as f:
                 return json.load(f)
         info = detect(self.path("music", music), start=start, duration=duration)
         out = {"bpm": info.bpm, "period": info.period, "beats": info.beats}
-        with open(cache, "w") as f:
+        with open(cache, "w", encoding="utf-8") as f:
             json.dump(out, f)
         return out
 
@@ -305,7 +311,8 @@ def make_handler(app: App):
             if not os.path.isfile(path):
                 return self.error("No encontrado", 404)
             size = os.path.getsize(path)
-            ctype = ctype or mimetypes.guess_type(path)[0] or "application/octet-stream"
+            ctype = (ctype or MIME_FIXED.get(os.path.splitext(path)[1].lower())
+                     or mimetypes.guess_type(path)[0] or "application/octet-stream")
             start, end = 0, size - 1
             rng = self.headers.get("Range")
             if rng:
@@ -422,7 +429,7 @@ def make_handler(app: App):
                     if left:
                         os.remove(tmp)
                         return self.error("Subida incompleta")
-                    os.replace(tmp, dest)
+                    sysutil.replace_file(tmp, dest)
                     if parts[2] == "luts":
                         app.save_lut(dest)
                     ff.probe.cache_clear()
@@ -477,12 +484,26 @@ def make_handler(app: App):
     return Handler
 
 
-def serve(workspace: str, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(workspace: str, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
     ff.require_ffmpeg()
     app = App(workspace)
-    httpd = ThreadingHTTPServer((host, port), make_handler(app))
-    print(f"VideoEditor en http://{host}:{port}  (carpeta de trabajo: {app.ws})")
+    try:
+        httpd = ThreadingHTTPServer((host, port), make_handler(app))
+    except OSError as e:
+        raise ff.FFmpegError(f"No se pudo abrir el puerto {port} en {host} ({e}). "
+                             f"¿Ya hay otro VideoEditor abierto? Prueba con --port {port + 1}.")
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}"
+    print(f"VideoEditor en {url}  (carpeta de trabajo: {app.ws})")
+    missing = [n for n in ("zscale", "vidstabdetect", "drawtext") if ff.available_filters() and not ff.has_filter(n)]
+    if missing:
+        print("Aviso: a tu FFmpeg le faltan filtros (" + ", ".join(missing) + "): algunas funciones se desactivan. "
+              "Detalles: python -m videoeditor doctor", file=sys.stderr)
     print("Ctrl+C para salir")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

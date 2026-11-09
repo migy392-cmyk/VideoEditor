@@ -19,7 +19,7 @@ import time
 from dataclasses import replace
 from functools import lru_cache
 
-from . import ff, luts
+from . import ff, luts, sysutil
 from .effects import effect_filters, grade_filters
 from .project import Project, Segment, Source, Text
 
@@ -97,9 +97,13 @@ def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str
     chain = []
     trc = _hdr_transfer(src.src)
     if trc:
-        chain += _hdr_chain(trc)
+        if ff.has_filter("zscale") and ff.has_filter("tonemap"):
+            chain += _hdr_chain(trc)
+        else:
+            sysutil.warn_once("tu FFmpeg no tiene zscale/tonemap: los videos HDR (iPhone) saldrán lavados. "
+                              "Instala la build 'full' de FFmpeg (ver: python -m videoeditor doctor).")
     if src.stabilize:
-        chain.append(f"vidstabtransform=input='{src.stabilize}':smoothing=12:zoom=4:optzoom=0:interpol=bilinear")
+        chain.append(f"vidstabtransform=input={ff.filter_value(src.stabilize)}:smoothing=12:zoom=4:optzoom=0:interpol=bilinear")
     if src.reverse:
         chain.append("reverse")
     if src.ramp and not src.reverse:
@@ -177,10 +181,15 @@ def _font_file(font: str) -> str | None:
     if os.path.isfile(font):
         return font
     if shutil.which("fc-match"):
-        r = subprocess.run(["fc-match", "-f", "%{file}", font], capture_output=True, text=True)
-        if r.returncode == 0 and os.path.isfile(r.stdout.strip()):
-            return r.stdout.strip()
-    return None
+        try:
+            r = subprocess.run(["fc-match", "-f", "%{file}", font], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            if r.returncode == 0 and os.path.isfile(r.stdout.strip()):
+                return r.stdout.strip()
+        except OSError:
+            pass
+    # Windows / macOS (sin fontconfig): fuentes habituales del sistema.
+    return sysutil.fallback_font()
 
 
 @lru_cache(maxsize=256)
@@ -230,13 +239,17 @@ def _look(project: Project, seg: Segment, src: Source | None, dur: float) -> lis
 
 def _text_filters(texts: list[Text], seg_dur: float, tmpdir: str, tag: str) -> list[str]:
     out = []
+    if texts and not (ff.has_filter("drawtext") or not ff.available_filters()):
+        sysutil.warn_once("tu FFmpeg no tiene el filtro drawtext: los textos del proyecto se omiten. "
+                          "Instala la build 'full' de FFmpeg (ver: python -m videoeditor doctor).")
+        return out
     for i, t in enumerate(texts):
         path = os.path.join(tmpdir, f"text_{tag}_{i}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(t.text)
         end = seg_dur if t.end is None else t.end
         opts = [
-            f"textfile='{path}'",
+            f"textfile={ff.filter_value(path)}",
             f"fontsize={t.size}",
             f"fontcolor={t.color}",
             f"x=w*{t.x}-text_w/2",
@@ -246,7 +259,7 @@ def _text_filters(texts: list[Text], seg_dur: float, tmpdir: str, tag: str) -> l
         ]
         font = _font_file(t.font)
         if font:
-            opts.insert(1, f"fontfile='{font}'")
+            opts.insert(1, f"fontfile={ff.filter_value(font)}")
         if t.box:
             opts += ["box=1", "boxcolor=black@0.5", "boxborderw=18"]
         out.append("drawtext=" + ":".join(opts))
@@ -260,9 +273,13 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
     inputs: list[str] = []
     graph: list[str] = []
 
-    if any(e.type == "stabilize" for e in seg.effects) and seg.source:
+    if any(e.type == "stabilize" for e in seg.effects) and seg.source and not (
+            ff.has_filter("vidstabdetect") and ff.has_filter("vidstabtransform")):
+        sysutil.warn_once("tu FFmpeg no tiene vidstab: se omite el efecto 'stabilize'. "
+                          "Instala la build 'full' de FFmpeg (ver: python -m videoeditor doctor).")
+    elif any(e.type == "stabilize" for e in seg.effects) and seg.source:
         trf = os.path.join(tmpdir, f"stab_{tag}.trf")
-        ff.run([*_source_input(seg.source, dur), "-vf", f"vidstabdetect=shakiness=7:accuracy=12:result='{trf}'",
+        ff.run([*_source_input(seg.source, dur), "-vf", f"vidstabdetect=shakiness=7:accuracy=12:result={ff.filter_value(trf)}",
                 "-f", "null", "-"])
         seg = replace(seg, source=replace(seg.source, stabilize=trf))
 
@@ -302,7 +319,7 @@ def build_segment_command(project: Project, seg: Segment, dur: float, out_path: 
         "-filter_complex", ";".join(graph),
         "-map", "[out]",
         "-an",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(0, o.crf - 4)),
+        *ff.video_codec_args(max(0, o.crf - 4), "veryfast"),
         "-r", str(fps),
         out_path,
     ]
@@ -422,7 +439,7 @@ def build_assemble_command(project: Project, seg_files: list[str], durations: li
         *inputs,
         "-filter_complex", ";".join(graph),
         *maps,
-        "-c:v", "libx264", "-preset", o.preset, "-crf", str(o.crf),
+        *ff.video_codec_args(o.crf, o.preset),
         "-pix_fmt", "yuv420p", "-r", str(o.fps),
         "-movflags", "+faststart",
         "-t", f"{total:.4f}",

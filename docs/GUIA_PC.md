@@ -8,6 +8,30 @@ Esta guía es para usarlo en tu ordenador, paso a paso. Tardarás unos 15 minuto
 
 ---
 
+## Instalación rápida en Windows (un solo paso)
+
+1. Abre **PowerShell** (botón Inicio → escribe "PowerShell" → Enter). No hace falta "como administrador".
+2. Copia y pega esta línea y pulsa Enter:
+
+   ```powershell
+   irm https://raw.githubusercontent.com/migy392-cmyk/VideoEditor/claude/serene-brown-fggcdl/scripts/instalar_windows.ps1 | iex
+   ```
+
+3. Espera (10–20 minutos la primera vez). Si Windows pregunta *"¿Desea permitir…?"*, pulsa **Sí**
+   (a veces la ventana aparece detrás de PowerShell).
+
+El instalador instala Python, Git y FFmpeg, descarga el proyecto en **`C:\VideoEditor`**, prepara todo,
+comprueba la instalación y crea un acceso directo **VideoEditor** en el escritorio. Se puede volver a
+ejecutar cuando quieras: lo ya instalado se salta y el proyecto se actualiza a la última versión.
+
+> Si prefieres no pegar comandos: descarga el ZIP del proyecto desde GitHub (**Code → Download ZIP**),
+> descomprímelo (clic derecho → *Extraer todo*) y haz doble clic en **`INSTALAR_WINDOWS.bat`**.
+
+Después, para usarlo, haz doble clic en **VideoEditor** en el escritorio y salta al [paso 5](#5-úsalo-cada-día).
+Los pasos 1–4 de abajo son la instalación manual (para macOS, Linux o si el instalador falla).
+
+---
+
 ## 1. Instala los programas necesarios (solo la primera vez)
 
 Necesitas **Python 3.10 o superior** y **FFmpeg** (la versión "full").

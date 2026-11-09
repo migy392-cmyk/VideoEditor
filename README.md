@@ -3,6 +3,10 @@
 Editor de video por proyectos JSON, basado en FFmpeg, para hacer edits verticales
 de gym / fitness sincronizados con la música, del estilo del video de referencia.
 
+**Guías paso a paso:**
+- [Usarlo en tu PC (Windows, macOS, Linux)](docs/GUIA_PC.md)
+- [Enseñarle técnicas nuevas con tus videos](docs/ENSENAR_TECNICAS.md)
+
 ## Lo que hace el video de referencia
 
 Lo analizamos con `python -m videoeditor analyze`:
@@ -367,8 +371,8 @@ donde dice el JSON, así los cortes siguen cayendo en el beat.
 
 ### Transiciones
 
-`cut`, `fade`, `fadeblack`, `flash`, `slideleft/right/up/down`,
-`wipeleft/right/up/down`, `smoothleft/right/up/down`, `zoom`, `pixelize`,
+`cut`, `fade`, `fadeblack`, `flash` (alias `fadewhite`), `slideleft/right/up/down`,
+`wipeleft/right/up/down`, `smoothleft/right/up/down`, `zoom` (alias `zoomin`), `pixelize`,
 `dissolve`, `circleopen`, `radial`, `squeezeh`, `squeezev`, `hblur`,
 `subject_drop` (la persona del plano siguiente, recortada del fondo, entra sobre el
 plano actual; `direction`: `top`, `bottom`, `left` o `right`) y dos transiciones
@@ -380,6 +384,23 @@ otra mitad al principio del siguiente, así el corte sigue cayendo en el beat):
 - `whip`: barrido de cámara; la imagen sale disparada hacia `direction` (`left`, `right`,
   `top` o `bottom`; por defecto `left`) con desenfoque direccional y el plano nuevo llega
   igual de rápido. Con `sound_design` lleva un whoosh.
+
+### Otras claves del proyecto
+
+| Clave | Para qué |
+|---|---|
+| `output.preset` | velocidad de codificación de x264 (`ultrafast` … `veryslow`; por defecto `medium`) |
+| `music.fade_in`, `music.normalize` | fundido de entrada; normalizar a -14 LUFS (por defecto `true`) |
+| `sfx_volume` | volumen de todos los efectos de sonido (por defecto 1) |
+| `info.beats`, `info.drop` | beats y drop de la canción (los rellena la app; la revisión de calidad los usa) |
+| textos: `x`, `color`, `font`, `box` | posición horizontal (0-1), color, fuente y caja de fondo |
+| clip: `ramp_ease` | suavizado de cada cambio de velocidad de la rampa (s) |
+| segmento: `grade`, `lut`, `lut_strength` | look propio de un plano |
+
+### Variables de entorno
+
+`VIDEOEDITOR_WORKSPACE` (carpeta de trabajo por defecto), `VIDEOEDITOR_CACHE` (cachés),
+`VIDEOEDITOR_LUT_CACHE` (LUTs con intensidad) y `VIDEOEDITOR_MODELS` (modelo de MediaPipe).
 
 ## Calidad: sin fallos
 
@@ -399,6 +420,9 @@ Cada render pasa por una revisión automática:
 
 ```
 videoeditor/
+  ff.py        llamadas a ffmpeg/ffprobe, escapado de rutas en filtros
+  sysutil.py   carpetas de caché por sistema, reemplazo seguro de archivos
+  doctor.py    comprobación de la instalación (python -m videoeditor doctor)
   project.py   modelo y validación del JSON
   render.py    render por segmentos + unión con concat/xfade + música y sonido
   effects.py   looks de color y efectos (filtros de FFmpeg)

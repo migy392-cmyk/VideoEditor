@@ -6,7 +6,8 @@
     python -m videoeditor auto --style gym --music cancion.mp3 clips... -o edit.mp4
     python -m videoeditor styles
     python -m videoeditor analyze referencia.mov [--template plantilla.json]
-    python -m videoeditor serve      (interfaz web)
+    python -m videoeditor serve      (interfaz web; --no-open para no abrir el navegador)
+    python -m videoeditor doctor     (comprueba la instalación)
     python -m videoeditor beats cancion.mp3
     python -m videoeditor list
     python -m videoeditor luts [--export DIR]
@@ -164,8 +165,14 @@ def cmd_lut_learn(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
 
-    serve(args.workspace or DEFAULT_WORKSPACE, host=args.host, port=args.port)
+    serve(args.workspace or DEFAULT_WORKSPACE, host=args.host, port=args.port, open_browser=args.open)
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from .doctor import main as doctor_main
+
+    return doctor_main(args.workspace or DEFAULT_WORKSPACE)
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -210,7 +217,17 @@ def cmd_list(_: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_console() -> None:
+    """Consolas de Windows (cp1252/cp850): que ✓ ⚠ → no tumben el programa con UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _safe_console()
     p = argparse.ArgumentParser(prog="videoeditor", description="Editor de video por proyectos JSON (FFmpeg)")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--workspace", "-w", help=f"Carpeta de trabajo (por defecto '{DEFAULT_WORKSPACE}')")
@@ -264,7 +281,13 @@ def main(argv: list[str] | None = None) -> int:
     sv = sub.add_parser("serve", help="Abre la interfaz web")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--open", dest="open", action="store_true", default=True,
+                    help="Abre el navegador al arrancar (por defecto)")
+    sv.add_argument("--no-open", dest="open", action="store_false", help="No abrir el navegador")
     sv.set_defaults(fn=cmd_serve)
+
+    sub.add_parser("doctor", help="Comprueba Python, FFmpeg (filtros), mediapipe, tesseract y la carpeta de trabajo"
+                   ).set_defaults(fn=cmd_doctor)
 
     z = sub.add_parser("analyze", help="Analiza un video de referencia (cortes, paneles, beats, glitch)")
     z.add_argument("video")
@@ -310,7 +333,8 @@ def main(argv: list[str] | None = None) -> int:
     from . import luts
     luts.set_workspace(args.workspace or DEFAULT_WORKSPACE)
     try:
-        ff.require_ffmpeg()
+        if args.cmd != "doctor":
+            ff.require_ffmpeg()
         return args.fn(args)
     except (ff.FFmpegError, ValueError, FileNotFoundError) as e:
         print(f"Error: {e}", file=sys.stderr)

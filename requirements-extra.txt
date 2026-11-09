@@ -1,0 +1,5 @@
+# Opcional: recorte de personas (transición "subject_drop"). Sin esto, esa transición
+# se sustituye por un deslizamiento normal.
+# En Linux también hacen falta las librerías del sistema libegl1 y libgles2.
+-r requirements.txt
+mediapipe>=0.10

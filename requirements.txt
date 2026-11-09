@@ -1,4 +1,2 @@
+# Imprescindible. FFmpeg se instala aparte (ver README; comprueba con: python -m videoeditor doctor).
 numpy>=1.24
-# Opcional: recorte de personas (transición "subject_drop").
-# En Linux también hacen falta las librerías del sistema libegl1 y libgles2.
-mediapipe>=0.10

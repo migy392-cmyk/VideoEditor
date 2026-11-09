@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
+from . import sysutil
 from .beats import HOP, SR, WIN, detect, load_audio, onset_envelope
 
 LABELS_ES = {"intro": "intro", "build": "subida", "drop": "drop", "break": "bajada", "outro": "final",
@@ -295,7 +296,7 @@ def analyze_music(path: str) -> MusicMap:
 
 
 def cached_music_map(path: str, cache_dir: str | None = None) -> MusicMap:
-    cache_dir = cache_dir or os.path.join(os.path.expanduser("~"), ".cache", "videoeditor", "music")
+    cache_dir = cache_dir or sysutil.cache_dir("music")
     os.makedirs(cache_dir, exist_ok=True)
     st = os.stat(path)
     key = f"{os.path.basename(path)}_{st.st_size}_{int(st.st_mtime)}_v2.json"

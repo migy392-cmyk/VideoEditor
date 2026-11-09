@@ -1,0 +1,130 @@
+"""Detección de tempo y beats (sólo numpy + ffmpeg para decodificar)."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from . import ff
+
+SR = 22050
+HOP = 512
+WIN = 1024
+
+
+@dataclass
+class BeatInfo:
+    bpm: float
+    period: float
+    beats: list[float]       # rejilla regular de beats (segundos)
+    onsets: list[float]      # golpes detectados (segundos)
+    duration: float
+
+    def beats_between(self, start: float, end: float) -> list[float]:
+        return [b for b in self.beats if start <= b < end]
+
+
+def load_audio(path: str, start: float = 0.0, duration: float | None = None) -> np.ndarray:
+    args = ["-ss", f"{start}"]
+    if duration:
+        args += ["-t", f"{duration}"]
+    args += ["-i", path, "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
+    raw = ff.capture(args)
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def onset_envelope(audio: np.ndarray) -> np.ndarray:
+    if len(audio) < WIN * 2:
+        return np.zeros(1)
+    frames = np.lib.stride_tricks.sliding_window_view(audio, WIN)[::HOP]
+    spec = np.abs(np.fft.rfft(frames * np.hanning(WIN), axis=1))
+    # flujo espectral logarítmico, ponderando graves (bombo) un poco más
+    weights = np.ones(spec.shape[1])
+    weights[: spec.shape[1] // 8] = 1.6
+    flux = np.maximum(0.0, np.diff(np.log1p(spec * 10), axis=0)) @ weights
+    flux = np.concatenate([[0.0], flux])
+    std = flux.std() or 1.0
+    return (flux - flux.mean()) / std
+
+
+def low_onsets(audio: np.ndarray) -> np.ndarray:
+    """Envolvente de golpes graves (bombo): decide en qué fase cae el beat."""
+    frames = np.lib.stride_tricks.sliding_window_view(audio, WIN)[::HOP]
+    spec = np.abs(np.fft.rfft(frames * np.hanning(WIN), axis=1))
+    freqs = np.fft.rfftfreq(WIN, 1 / SR)
+    low = np.log1p(spec[:, freqs < 180].sum(axis=1) * 10)
+    flux = np.maximum(0.0, np.diff(low, prepend=low[0]))
+    return flux / (flux.std() + 1e-9)
+
+
+def _refine_grid(env: np.ndarray, low: np.ndarray, step0: float) -> tuple[float, float]:
+    """Busca el periodo exacto (±3 %) y la fase de una rejilla regular que mejor
+    encaja con los golpes de toda la canción. Devuelve (periodo, primer beat) en frames."""
+    n = len(env)
+    x = np.arange(n)
+    e = np.maximum(env, 0)
+    best = (-1.0, step0, 0.0)
+    for step in np.linspace(step0 * 0.97, step0 * 1.03, 241):
+        k = np.arange(0, int(n / step))
+        phases = np.arange(0, step, 0.25)
+        pos = phases[:, None] + k[None, :] * step
+        pos = pos[:, :] if pos.size else pos
+        valid = pos < n - 1
+        sc = (np.interp(np.where(valid, pos, 0), x, e) * valid).sum(axis=1)
+        i = int(np.argmax(sc))
+        if sc[i] > best[0]:
+            best = (float(sc[i]), float(step), float(phases[i]))
+    _, step, phase = best
+    # ¿beat o contratiempo? El que tenga más bombo
+    k = np.arange(0, int(n / step) + 1)
+
+    def low_score(ph):
+        pos = ph + k * step
+        pos = pos[pos < n - 1]
+        return np.interp(pos, x, low).sum()
+
+    alt = (phase + step / 2) % step
+    if low_score(alt) > 1.15 * low_score(phase):
+        phase = alt
+    return step, phase
+
+
+def detect(path: str, start: float = 0.0, duration: float | None = None,
+           min_bpm: float = 70, max_bpm: float = 180) -> BeatInfo:
+    audio = load_audio(path, start, duration)
+    total = len(audio) / SR
+    env = onset_envelope(audio)
+    fps = SR / HOP
+    if len(env) < 8:
+        return BeatInfo(bpm=120.0, period=0.5, beats=[], onsets=[], duration=total)
+
+    # Onsets: picos locales por encima del umbral
+    thr = 1.2
+    peaks = [i for i in range(1, len(env) - 1) if env[i] > thr and env[i] >= env[i - 1] and env[i] > env[i + 1]]
+    onsets = [round(float(i / fps), 3) for i in peaks]
+
+    # Tempo por autocorrelación con preferencia suave por ~120 BPM
+    e = np.maximum(env, 0)
+    ac = np.correlate(e, e, mode="full")[len(e) - 1:]
+    lags = np.arange(len(ac)) / fps
+    valid = (lags >= 60.0 / max_bpm) & (lags <= 60.0 / min_bpm)
+    if not valid.any():
+        return BeatInfo(bpm=120.0, period=0.5, beats=[], onsets=onsets, duration=total)
+    bpms = 60.0 / np.where(lags > 0, lags, 1)
+    prior = np.exp(-0.5 * (np.log2(bpms / 120.0) / 0.9) ** 2)
+    score = np.where(valid, ac * prior, -np.inf)
+    lag_i = int(np.argmax(score))
+    # refinamiento parabólico
+    if 1 <= lag_i < len(ac) - 1:
+        a, b, c = ac[lag_i - 1], ac[lag_i], ac[lag_i + 1]
+        denom = a - 2 * b + c
+        shift = 0.5 * (a - c) / denom if denom != 0 else 0.0
+    else:
+        shift = 0.0
+    period = (lag_i + shift) / fps
+
+    period, first = _refine_grid(e, low_onsets(audio), period * fps)
+    period /= fps
+    first /= fps
+    beats = [round(float(t), 3) for t in np.arange(first, total, period)]
+    return BeatInfo(bpm=round(float(60.0 / period), 2), period=float(period), beats=beats, onsets=onsets, duration=total)

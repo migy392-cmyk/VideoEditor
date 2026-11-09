@@ -4,7 +4,7 @@ Genera un video con canal alfa donde sólo queda la persona. Se usa en la
 transición `subject_drop` (la silueta del plano siguiente cae sobre el actual)
 y en el efecto de recorte en general.
 
-El modelo se descarga la primera vez a ~/.cache/videoeditor/models
+El modelo se descarga la primera vez a la carpeta de caché del sistema (~/.cache/videoeditor/models en Linux, %LOCALAPPDATA%/videoeditor/Cache/models en Windows)
 (o a la carpeta indicada en la variable de entorno VIDEOEDITOR_MODELS).
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import urllib.request
 
 import numpy as np
 
-from . import ff
+from . import ff, sysutil
 
 MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
              "selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite")
@@ -27,7 +27,7 @@ class SegmentationUnavailable(RuntimeError):
 
 
 def models_dir() -> str:
-    d = os.environ.get("VIDEOEDITOR_MODELS") or os.path.join(os.path.expanduser("~"), ".cache", "videoeditor", "models")
+    d = os.environ.get("VIDEOEDITOR_MODELS") or sysutil.cache_dir("models")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -40,7 +40,7 @@ def ensure_model() -> str:
             urllib.request.urlretrieve(MODEL_URL, tmp)
         except OSError as e:
             raise SegmentationUnavailable(f"No se pudo descargar el modelo de segmentación: {e}")
-        os.replace(tmp, path)
+        sysutil.replace_file(tmp, path)
     return path
 
 

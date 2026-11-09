@@ -286,6 +286,176 @@ class EditorTests(unittest.TestCase):
         if shutil.which("tesseract"):
             self.assertTrue(any("PUSH" in t["text"] for t in a.shots[3].texts), a.shots[3].texts)
 
+    # ---------------------------------------------------------------- técnicas nuevas
+    def color_clip(self):
+        """Segundo clip en color y con movimiento, distinto de testsrc2 (tono girado y volteado)."""
+        if not hasattr(type(self), "_tsb"):
+            p = os.path.join(self.dir, "tsb.mp4")
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x568:rate=30:duration=3",
+                            "-vf", "hue=h=120,hflip,vflip", "-c:v", "libx264", "-pix_fmt", "yuv420p", p], check=True)
+            type(self)._tsb = p
+        return self._tsb
+
+    def techniques_video(self):
+        """Edit con todas las técnicas nuevas, en tiempos conocidos (se renderiza una vez)."""
+        if not hasattr(type(self), "_tech"):
+            a, b = self.clips[0], self.color_clip()
+            data = {"output": {"width": 180, "height": 320, "fps": 30, "crf": 20, "preset": "ultrafast"},
+                    "music": {"src": self.music}, "segments": [
+                        {"type": "clip", "src": a, "duration": 2.0, "effects": [{"type": "freeze", "at": 0.8, "duration": 0.5}]},
+                        {"type": "clip", "src": b, "duration": 2.0, "grade": "bw"},
+                        {"type": "clip", "src": a, "in": 1.0, "duration": 2.0,
+                         "effects": [{"type": "strobe", "at": 0.5, "duration": 1.0, "rate": 6}]},
+                        {"type": "clip", "src": b, "in": 1.0, "duration": 2.0,
+                         "effects": [{"type": "bw_flash", "times": [1.0], "duration": 0.15}]},
+                        {"type": "clip", "src": a, "in": 0.5, "duration": 1.5, "transition": {"type": "zoomthrough", "duration": 0.4}},
+                        {"type": "clip", "src": b, "duration": 1.5, "transition": {"type": "whip", "duration": 0.4}},
+                        {"type": "stack", "layout": "columns", "duration": 2.4, "panels": [
+                            {"src": a, "appear": 0}, {"src": b, "appear": 0.8}, {"src": a, "in": 1.0, "appear": 1.6}]},
+                        {"type": "stack", "layout": "grid", "duration": 2.4, "panels": [
+                            {"src": a, "appear": 0}, {"src": b, "appear": 0.6}, {"src": a, "in": 1.0, "appear": 1.2},
+                            {"src": b, "in": 1.0, "appear": 1.8}]},
+                        {"type": "clip", "src": a, "duration": 1.0}]}
+            project = parse_project(data, self.dir)
+            out = os.path.join(self.dir, "tecnicas.mp4")
+            rep = {}
+            render(project, out, log=lambda *_: None, report=rep)
+            type(self)._tech = (out, project, rep)
+        return self._tech
+
+    def test_new_techniques_roundtrip(self):
+        """Congelación, blanco y negro, estroboscopio, destello B/N, zoom a través del corte,
+        barrido y paneles en columnas / cuadrícula: se renderizan y el análisis los encuentra."""
+        out, project, rep = self.techniques_video()
+        # el QA no confunde la congelación ni el estroboscopio con fallos
+        self.assertFalse([i for i in rep["check"]["issues"] if "congelada" in i or "Negro" in i], rep["check"]["issues"])
+        a = analyze(out)
+        sh = a.shots
+        starts = [s.start for s in sh]
+        self.assertEqual(len(sh), 9, [(s.start, s.kind, s.transition["type"]) for s in sh])
+        for got, want in zip(starts, [0, 2, 4, 6, 8, 9.5, 11, 13.4, 15.8]):
+            self.assertAlmostEqual(got, want, delta=0.15)
+        # 1. imagen congelada
+        self.assertEqual(len(sh[0].freezes), 1)
+        self.assertAlmostEqual(sh[0].freezes[0][0], 0.8, delta=0.15)
+        self.assertAlmostEqual(sh[0].freezes[0][1], 0.5, delta=0.15)
+        # 2. plano en blanco y negro y destello en B/N
+        self.assertEqual([s.grade for s in sh], [None, "bw"] + [None] * 7)
+        self.assertEqual(len(sh[3].bw_flashes), 1)
+        self.assertAlmostEqual(sh[3].bw_flashes[0][0], 1.0, delta=0.15)
+        # 3. estroboscopio: momento, duración y ritmo
+        self.assertEqual(len(sh[2].strobes), 1)
+        st = sh[2].strobes[0]
+        self.assertAlmostEqual(st["at"], 0.5, delta=0.15)
+        self.assertAlmostEqual(st["duration"], 1.0, delta=0.15)
+        self.assertAlmostEqual(st["rate"], 6.0, delta=0.5)
+        # 4-5. zoom a través del corte y barrido (centrados en el corte)
+        self.assertEqual(sh[4].transition["type"], "zoomthrough")
+        self.assertAlmostEqual(sh[4].transition["duration"], 0.4, delta=0.15)
+        self.assertEqual(sh[5].transition["type"], "whip")
+        self.assertEqual(sh[5].transition["direction"], "left")
+        self.assertAlmostEqual(sh[5].transition["duration"], 0.4, delta=0.15)
+        # 6. paneles en columnas y en cuadrícula
+        self.assertEqual((sh[6].kind, sh[6].layout, len(sh[6].panels)), ("stack", "columns", 3))
+        self.assertEqual((sh[7].kind, sh[7].layout, len(sh[7].panels)), ("stack", "grid", 4))
+        for got, want in zip(sh[6].panels + sh[7].panels, [0, 0.8, 1.6, 0, 0.6, 1.2, 1.8]):
+            self.assertAlmostEqual(got, want, delta=0.15)
+        # sin nada más inventado
+        for i, s in enumerate(sh):
+            self.assertEqual(len(s.freezes), int(i == 0))
+            self.assertEqual(len(s.strobes), int(i == 2))
+            self.assertEqual(len(s.bw_flashes), int(i == 3))
+            self.assertFalse(s.speed or s.shakes, (i, s.speed, s.shakes))
+        tpl = to_template(a)
+        segs = tpl["segments"]
+        self.assertEqual(segs[1]["grade"], "bw")
+        self.assertEqual(segs[6]["layout"], "columns")
+        self.assertIn("freeze", [e["type"] for e in segs[0]["effects"]])
+        parse_project(tpl, self.dir)
+        report_txt = __import__("videoeditor.analyze", fromlist=["report"]).report(a)
+        for word in ("imagen congelada", "blanco y negro", "estroboscopio", "zoom a través del corte",
+                     "barrido", "columnas", "cuadrícula", "destello en B/N"):
+            self.assertIn(word, report_txt)
+
+    def test_new_techniques_no_false_positives(self):
+        """Un montaje normal (cortes secos, un slide y un zoom de golpe) no tiene ninguna técnica nueva."""
+        c, b = self.clips, self.color_clip()
+        data = {"output": {"width": 180, "height": 320, "fps": 30, "crf": 20, "preset": "ultrafast"}, "segments": [
+            {"type": "clip", "src": c[0], "duration": 1.5},
+            {"type": "clip", "src": b, "duration": 1.5, "effects": [{"type": "punch", "times": [0.7]}]},
+            {"type": "clip", "src": c[1], "duration": 1.5},
+            {"type": "clip", "src": c[0], "in": 1.0, "duration": 1.5, "transition": {"type": "slideleft", "duration": 0.4}},
+            {"type": "clip", "src": b, "in": 1.0, "duration": 1.5},
+            {"type": "stack", "duration": 2.0, "panels": [{"src": c[0], "appear": 0}, {"src": b, "appear": 0.7},
+                                                          {"src": c[0], "in": 1, "appear": 1.4}]}]}
+        out = os.path.join(self.dir, "control.mp4")
+        render(parse_project(data, self.dir), out, log=lambda *_: None, qa=False)
+        a = analyze(out)
+        types = {s.transition["type"] for s in a.shots}
+        self.assertFalse(types & {"zoomthrough", "whip"}, types)
+        self.assertEqual((a.shots[-1].kind, a.shots[-1].layout, len(a.shots[-1].panels)), ("stack", "rows", 3))
+        for s in a.shots:
+            self.assertFalse(s.freezes or s.strobes or s.bw_flashes or s.grade, s)
+            self.assertTrue(s.kind != "stack" or s.layout == "rows")
+        # los cortes siguen donde estaban
+        for want in (1.5, 3.0, 6.0, 7.5):
+            self.assertLess(min(abs(s.start - want) for s in a.shots), 0.1)
+
+    def test_new_techniques_learn_and_apply(self):
+        out, _, _ = self.techniques_video()
+        sdir = os.path.join(self.dir, "styles_tec")
+        style = learn([out], "Técnicas", sdir, log=lambda *_: None)
+        secs = style["variants"][0]["sections"]
+        p = 60 / style["variants"][0]["bpm"]
+        self.assertEqual(secs[1].get("grade"), "bw")
+        fx = {e["type"]: e for sec in secs for e in sec.get("effects", [])}
+        self.assertTrue({"freeze", "strobe", "bw_flash"} <= set(fx), fx)
+        self.assertAlmostEqual(fx["freeze"]["beats"] * p, 0.5, delta=0.15)
+        self.assertAlmostEqual(fx["strobe"]["period_beats"] * p, 1 / 6, delta=0.03)  # 6 Hz en beats
+        self.assertEqual(secs[4]["transition"]["type"], "zoomthrough")
+        self.assertEqual(secs[5]["transition"]["type"], "whip")
+        self.assertEqual([secs[6].get("layout"), secs[7].get("layout")], ["columns", "grid"])
+
+        data, info = apply_style(style, self.clips[:2] + [self.color_clip()], self.music,
+                                 AutoOptions(), self.dir, follow_music=False, variant=0)
+        segs = data["segments"]
+        self.assertEqual([s.get("layout") for s in segs if s["type"] == "stack"], ["columns", "grid"])
+        self.assertIn("bw", [s.get("grade") for s in segs])
+        self.assertEqual({"zoomthrough", "whip"}, {(s.get("transition") or {}).get("type") for s in segs} & {"zoomthrough", "whip"})
+        types = {e["type"] for s in segs for e in s.get("effects", [])}
+        self.assertTrue({"freeze", "strobe", "bw_flash"} <= types, types)
+        # el estroboscopio va en subdivisiones del beat de la canción nueva
+        strobe = next(e for s in segs for e in s.get("effects", []) if e["type"] == "strobe")
+        self.assertAlmostEqual(1 / strobe["rate"], fx["strobe"]["period_beats"] * info.period, delta=0.01)
+        # los cortes de las transiciones centradas caen en el beat
+        t = 0.0
+        for s in segs:
+            if (s.get("transition") or {}).get("type") in ("zoomthrough", "whip"):
+                self.assertLess(min(abs(t - b) for b in info.beats), 0.02)
+            t += s["duration"]
+        project = parse_project(self.small(data), self.dir)
+        from videoeditor.render import _sfx_cues
+        self.assertTrue(any(c_["type"] == "whoosh" for c_ in _sfx_cues(project)))
+        out2 = os.path.join(self.dir, "styled_tec.mp4")
+        render(project, out2, log=lambda *_: None)
+        self.assertAlmostEqual(ff.duration(out2), project.total_duration, delta=0.15)
+
+    def test_new_techniques_validation(self):
+        with self.assertRaises(ProjectError):
+            parse_project({"segments": [{"type": "stack", "duration": 1, "layout": "diagonal",
+                                         "panels": [{"src": "a"}, {"src": "b"}]}]})
+        with self.assertRaises(ProjectError):  # la mitad de salida no cabe en el segmento anterior
+            parse_project({"segments": [{"type": "black", "duration": 0.1},
+                                        {"type": "black", "duration": 1, "transition": {"type": "whip", "duration": 0.4}}]})
+        p = parse_project({"segments": [{"type": "black", "duration": 1},
+                                        {"type": "black", "duration": 1, "transition": {"type": "whip", "duration": 0.4}}]})
+        self.assertEqual(p.segments[1].transition.direction, "left")
+        self.assertEqual(p.segments[1].transition.overlap, 0.0)
+        from videoeditor.render import expand_transitions
+        ex = expand_transitions(p)
+        self.assertEqual([e.type for e in ex.segments[0].effects], ["tr_whip"])
+        self.assertEqual(ex.segments[1].effects[0].params["phase"], "in")
+
     # ---------------------------------------------------------------- calidad
     def test_quality_checks(self):
         data = {"output": {"width": 180, "height": 320, "fps": 30, "preset": "ultrafast"}, "music": {"src": self.music},

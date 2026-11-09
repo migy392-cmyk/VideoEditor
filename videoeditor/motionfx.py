@@ -103,8 +103,11 @@ def frame_motion(fr: np.ndarray) -> dict[str, np.ndarray]:
         dx[i], dy[i] = best
         raw[i] = base
         resid[i] = min(errs[k], best_e)
+    # nitidez por eje: cae mucho en el eje de un barrido (desenfoque direccional)
+    gx = np.abs(np.diff(fr, axis=2)).mean(axis=(1, 2)) if n else np.zeros(0)
+    gy = np.abs(np.diff(fr, axis=1)).mean(axis=(1, 2)) if n else np.zeros(0)
     # raw: cambio sin compensar; resid: cambio que queda tras compensar zoom o desplazamiento
-    return {"scale": scale, "dx": dx, "dy": dy, "resid": resid, "raw": raw}
+    return {"scale": scale, "dx": dx, "dy": dy, "resid": resid, "raw": raw, "gx": gx, "gy": gy}
 
 
 def _smooth(x: np.ndarray, k: int) -> np.ndarray:

@@ -33,6 +33,7 @@ GRADES: dict[str, str] = {
     "warm": "eq=contrast=1.05:saturation=1.1,colorbalance=rs=0.04:rm=0.05:rh=0.06:bh=-0.06",
     "cold": "eq=contrast=1.06:saturation=0.95,colorbalance=rs=-0.05:bs=0.06:bm=0.04:rh=-0.03:bh=0.04",
     "bw": "hue=s=0,eq=contrast=1.25:brightness=-0.02",
+    "desaturated": "hue=s=0.35,eq=contrast=1.1",
     "vivid": "eq=contrast=1.08:saturation=1.35",
     "faded": "eq=contrast=0.9:brightness=0.03:saturation=0.8,curves=all='0/0.06 1/0.94'",
     # Cine: curva en S suave, negros levantados, sombras frías y altas luces cálidas, algo menos de saturación
@@ -228,6 +229,111 @@ def fx_stabilize(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[st
     return []
 
 
+def fx_freeze(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Imagen congelada: se detiene en un fotograma y luego el plano sigue desde ahí.
+    Parámetros: at (segundos o "start"/"end"), duration (0.5). Se aplica antes que el resto
+    de efectos, así un flash o un zoom de golpe en el mismo instante se ven sobre la imagen quieta.
+    Las congelaciones de un mismo segmento se combinan en `_freeze_chain`."""
+    return _freeze_chain([e], seg_dur, fps)
+
+
+def freeze_windows(effects: list[Effect], seg_dur: float) -> list[tuple[float, float]]:
+    """Tramos [inicio, fin) congelados de un segmento (en segundos del segmento)."""
+    wins = []
+    for e in effects:
+        if e.type == "freeze":
+            a, b = _window(e, seg_dur, 0.5)
+            if b - a > 0.01:
+                wins.append((a, b))
+    return sorted(wins)
+
+
+def _freeze_chain(effects: list[Effect], seg_dur: float, fps: int) -> list[str]:
+    # Se retrasan los fotogramas posteriores a cada congelación y `fps` rellena el hueco
+    # repitiendo el último fotograma anterior: la imagen se queda quieta exactamente ahí.
+    terms, shift = [], 0.0
+    for a, b in freeze_windows(effects, seg_dur):
+        src_t = a - shift  # instante del clip (antes de las congelaciones anteriores)
+        terms.append(f"{b - a:.4f}*gte(T\\,{src_t + 0.5 / fps:.4f})")
+        shift += b - a
+    if not terms:
+        return []
+    return [f"setpts='PTS+({'+'.join(terms)})/TB'", f"fps={fps}"]
+
+
+def fx_strobe(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Estroboscopio: la imagen parpadea (se oscurece o se ilumina) a ritmo fijo.
+    Parámetros: at, duration (1.0), rate (parpadeos por segundo, 8), amount (0..1, 1 = negro total),
+    color ("black" o "white"), duty (fracción de cada ciclo apagada, 0.5)."""
+    a, b = _window(e, seg_dur, 1.0)
+    rate = max(0.5, float(e.get("rate", 8.0)))
+    amt = min(1.0, max(0.0, float(e.get("amount", 1.0))))
+    duty = min(0.9, max(0.1, float(e.get("duty", 0.5))))
+    color = str(e.get("color", "black"))
+    per = 1.0 / rate
+    on = f"{_between(a, b - 0.5 / fps)}*lt(mod(t-{a:.4f}+0.001\\,{per:.5f})\\,{per * duty:.5f})"
+    return [f"drawbox=x=0:y=0:w=iw:h=ih:color={color}@{amt:.3f}:t=fill:enable='{on}'"]
+
+
+def fx_bw_flash(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Destello en blanco y negro: unos fotogramas sin color (p. ej. en los beats).
+    Parámetros: times [s], duration (0.12)."""
+    d = max(1.0 / fps, float(e.get("duration", 0.12)))
+    en = "+".join(_between(t, t + d - 0.5 / fps) for t in _times(e)) or "0"
+    return [f"hue=s=0:enable='{en}'", f"eq=contrast=1.2:enable='{en}'"]
+
+
+def _phase(e: Effect, seg_dur: float) -> tuple[float, float, bool]:
+    """Ventana de la mitad de una transición centrada: (inicio, duración, ¿es la salida?)."""
+    d = min(seg_dur, max(0.02, float(e.get("duration", 0.2))))
+    out = e.get("phase", "out") == "out"
+    return (seg_dur - d if out else 0.0), d, out
+
+
+def fx_tr_zoom(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Mitad de la transición `zoomthrough` (uso interno del render).
+    phase "out": zoom que acelera hasta el corte; "in": entra ampliado y se asienta."""
+    a, d, out = _phase(e, seg_dur)
+    amt = float(e.get("amount", 1.0 if out else 0.6))
+    u = f"clip((it-{a:.4f})/{d:.4f}\\,0\\,1)"
+    # (zoompan con zoom exactamente 1 recorta distinto que con 1.00x: un mínimo fijo evita
+    # un salto de un fotograma justo cuando el zoom termina o empieza)
+    z = f"1.004+{amt}*pow({u}\\,2)" if out else f"1.004+{amt}*pow(1-{u}\\,2)"
+    return [f"zoompan=z='{z}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s={w}x{h}:fps={fps}", "setsar=1"]
+
+
+_WHIP = [0]
+
+
+def fx_tr_whip(e: Effect, seg_dur: float, w: int, h: int, fps: int) -> list[str]:
+    """Mitad de la transición `whip` (uso interno del render): la imagen se desplaza muy rápido
+    hacia `direction` (left/right/top/bottom) con desenfoque direccional creciente (salida)
+    o decreciente (entrada). La imagen se repite en mosaico, como un barrido real de cámara."""
+    a, d, out = _phase(e, seg_dur)
+    direction = e.get("direction", "left")
+    horiz = direction in ("left", "right")
+    size = w if horiz else h
+    u = f"clip((t-{a:.4f})/{d:.4f}\\,0\\,1)"
+    travel = 0.9 * size
+    # o: cuánto se ha desplazado el contenido hacia la izquierda/arriba (en mosaico)
+    o = f"{travel:.1f}*pow({u}\\,2)" if out else f"{size}-{travel:.1f}*pow(1-{u}\\,2)"
+    if direction in ("right", "bottom"):
+        o = f"{size}-({o})"
+    _WHIP[0] += 1
+    k = _WHIP[0]
+    stack = "hstack" if horiz else "vstack"
+    crop = f"crop={w}:{h}:x='{o}':y=0" if horiz else f"crop={w}:{h}:x=0:y='{o}'"
+    chain = [f"split[wh{k}a][wh{k}b];[wh{k}a][wh{k}b]{stack}", crop]
+    # desenfoque direccional por tramos (más fuerte cuanto más rápido va)
+    steps = (0.02, 0.05, 0.09) if out else (0.09, 0.05, 0.02)
+    for j, frac in enumerate(steps):
+        lo, hi = a + d * j / 3, a + d * (j + 1) / 3
+        sg = max(1.0, size * frac)
+        sx, sy = (sg, 0.5) if horiz else (0.5, sg)
+        chain.append(f"gblur=sigma={sx:.1f}:sigmaV={sy:.1f}:enable='{_between(lo, hi)}'")
+    return chain
+
+
 EffectFn = Callable[[Effect, float, int, int, int], list[str]]
 
 EFFECTS: dict[str, EffectFn] = {
@@ -245,12 +351,24 @@ EFFECTS: dict[str, EffectFn] = {
     "halation": fx_halation,
     "film_grain": fx_film_grain,
     "stabilize": fx_stabilize,
+    "freeze": fx_freeze,
+    "strobe": fx_strobe,
+    "bw_flash": fx_bw_flash,
+    # internos: el render los añade a ambos lados de las transiciones zoomthrough / whip
+    "tr_zoom": fx_tr_zoom,
+    "tr_whip": fx_tr_whip,
 }
 
 
+INTERNAL = ("tr_zoom", "tr_whip")  # no se ofrecen al usuario
+
+
 def effect_filters(effects: list[Effect], seg_dur: float, w: int, h: int, fps: int) -> list[str]:
-    out: list[str] = []
+    # Las congelaciones van primero: cambian el tiempo del plano y el resto de efectos
+    # (flash, zoom de golpe…) se colocan sobre el resultado.
+    out: list[str] = _freeze_chain([e for e in effects if e.type == "freeze"], seg_dur, fps)
     for e in effects:
-        out.extend(EFFECTS[e.type](e, seg_dur, w, h, fps))
+        if e.type != "freeze":
+            out.extend(EFFECTS[e.type](e, seg_dur, w, h, fps))
     return out
 

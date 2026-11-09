@@ -314,9 +314,10 @@ def make_handler(app: App):
                 if api == ["meta"]:
                     from . import segment
                     from .auto import TEMPLATES
-                    from .effects import EFFECTS, GRADES
-                    from .project import DROP_DIRECTIONS, TRANSITIONS
-                    return self.send_json({"effects": list(EFFECTS), "transitions": list(TRANSITIONS),
+                    from .effects import EFFECTS, GRADES, INTERNAL
+                    from .project import DROP_DIRECTIONS, LAYOUTS, TRANSITIONS
+                    return self.send_json({"effects": [e for e in EFFECTS if e not in INTERNAL],
+                                           "transitions": list(TRANSITIONS), "layouts": list(LAYOUTS),
                                            "grades": list(GRADES), "templates": list(TEMPLATES),
                                            "directions": list(DROP_DIRECTIONS),
                                            "segmentation": segment.available(), "workspace": app.ws})

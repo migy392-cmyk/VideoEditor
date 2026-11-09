@@ -7,7 +7,8 @@ Antes:
 - punto de entrada más allá del final del clip
 - clips HDR (iPhone) → se avisa de que se convierten a SDR
 Después:
-- fotogramas congelados o negros que no estaban previstos
+- fotogramas congelados o negros que no estaban previstos (las congelaciones del efecto
+  `freeze` y los parpadeos del estroboscopio sí lo están)
 - cortes fuera de tiempo respecto a los beats
 - audio saturado y volumen (LUFS) para redes
 - duración final
@@ -20,6 +21,7 @@ from dataclasses import replace
 import numpy as np
 
 from . import ff
+from .effects import _window, freeze_windows
 from .project import Project, Source
 
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
@@ -68,7 +70,7 @@ def preflight(project: Project) -> tuple[Project, list[str]]:
     hdr_seen = set()
     for i, seg in enumerate(project.segments):
         where = f"Segmento {i + 1}"
-        tail = project.segments[i + 1].transition.duration if i + 1 < len(project.segments) else 0.0
+        tail = project.segments[i + 1].transition.overlap if i + 1 < len(project.segments) else 0.0
         if seg.source:
             seg = replace(seg, source=_fix_source(seg.source, seg.duration + tail, warn, where))
             if is_hdr(seg.source.src):
@@ -135,6 +137,13 @@ def check_output(path: str, project: Project, beats: list[float] | None = None) 
         src = seg.source
         if (src and (src.speed < 0.9 or src.ramp)) or any(p.speed < 0.9 for p in seg.panels):
             slow[a:b] = True
+        # imagen congelada intencionada (efecto freeze) y parpadeos de un estroboscopio
+        for fa, fb in freeze_windows(seg.effects, seg.duration):
+            slow[max(0, int((t + fa) * fps) - 1):int((t + fb) * fps) + 2] = True
+        for e in seg.effects:
+            if e.type == "strobe":
+                sa, sb = _window(e, seg.duration, 1.0)
+                planned_black[max(0, int((t + sa) * fps) - 1):int((t + sb) * fps) + 2] = True
         t += seg.duration
 
     if n > 2:
@@ -157,7 +166,7 @@ def check_output(path: str, project: Project, beats: list[float] | None = None) 
             if t < 0.3:
                 continue
             nxt = segs_[k + 1].transition
-            hit = t + (nxt.duration if nxt.type != "cut" else 0.0)  # con slide, cuenta el aterrizaje
+            hit = t + nxt.overlap  # con slide, cuenta el aterrizaje (en las centradas, el corte)
             d = min(min(abs(t - b) for b in beats), min(abs(hit - b) for b in beats))
             if d > 0.07:
                 off.append(f"{t:.2f}s ({d * 1000:.0f} ms)")

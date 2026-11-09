@@ -5,9 +5,11 @@ beats (no en segundos), de modo que se puede aplicar a cualquier canción:
 
 - estructura: negro inicial, paneles apilados y cuándo entra cada panel,
   duración de cada plano en beats
-- transiciones (corte, disolución, flash, fundido a negro, slide, persona que entra)
-  y su duración en beats
-- efectos (glitch al final, flashes, barras de cine)
+- transiciones (corte, disolución, flash, fundido a negro, slide, persona que entra,
+  zoom a través del corte, barrido) y su duración en beats
+- efectos (glitch al final, flashes, barras de cine, imagen congelada, estroboscopio
+  con su ritmo en subdivisiones del beat, destellos en blanco y negro)
+- planos en blanco y negro o desaturados y paneles en columnas o en cuadrícula
 - cuánto movimiento tiene cada plano (para colocar tus clips más movidos donde
   la referencia tiene los planos más movidos)
 - el perfil de color, para copiar el look
@@ -36,6 +38,16 @@ Q = 0.25  # resolución en beats
 
 def _q(x: float, minimum: float = 0.0) -> float:
     return max(minimum, round(x / Q) * Q)
+
+
+# Subdivisiones del beat a las que se ajusta el ritmo de un estroboscopio
+SUBDIV = (1 / 8, 1 / 6, 1 / 4, 1 / 3, 1 / 2, 2 / 3, 1.0, 2.0)
+CENTERED = ("zoomthrough", "whip")  # transiciones centradas en el corte (el corte cae en el beat)
+
+
+def _subdiv(beats: float) -> float:
+    """Ajusta un periodo (en beats) a la subdivisión musical más cercana."""
+    return round(min(SUBDIV, key=lambda s: abs(np.log(max(beats, 1e-3) / s))), 4)
 
 
 def slugify(name: str) -> str:
@@ -81,7 +93,7 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
     bounds = []
     for s in a.shots:
         ttype = s.transition.get("type", "cut")
-        moving = ttype not in ("cut", "fade", "fadeblack", "flash", "dissolve", "fadewhite")
+        moving = ttype not in ("cut", "fade", "fadeblack", "flash", "dissolve", "fadewhite", *CENTERED)
         d = s.transition.get("duration", 0) if moving else 0
         if d:  # slide / persona que entra: en el beat cae el aterrizaje
             bounds.append(snap(pos(s.start + d)) - _q(d / p, Q))
@@ -103,6 +115,8 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
             sec = {"type": "stack", "beats": beats,
                    "panels": [_q(x / p) for x in (s.panels if len(s.panels) >= 2 else [0.0, 0.0])],
                    "motion": s.motion}
+            if s.layout != "rows":
+                sec["layout"] = s.layout
         else:
             sec = {"type": "clip", "beats": beats, "motion": s.motion}
             if menergy[i] is not None:
@@ -117,6 +131,17 @@ def variant_from_analysis(a: Analysis, source: str) -> dict:
                            "amount": round(float(np.mean([a_ for _, a_ in s.punches])), 3)})
             for t0, d, amt in s.shakes:
                 fx.append({"type": "shake", "at_beats": _q(t0 / p), "beats": _q(d / p, Q), "amount": amt})
+            for t0, d in s.freezes:
+                fx.append({"type": "freeze", "at_beats": _q(t0 / p), "beats": _q(d / p, Q)})
+            for st in s.strobes:
+                fx.append({"type": "strobe", "at_beats": _q(st["at"] / p), "beats": _q(st["duration"] / p, Q),
+                           "period_beats": _subdiv(1.0 / (st["rate"] * p)), "amount": st["amount"],
+                           "duty": st["duty"], "color": st["color"]})
+            if s.bw_flashes:
+                fx.append({"type": "bw_flash", "beats": [_q(t0 / p) for t0, _ in s.bw_flashes],
+                           "dur_beats": round(max(d for _, d in s.bw_flashes) / p, 3)})
+            if s.grade:
+                sec["grade"] = s.grade
             if s.speed:
                 ramp = []
                 for t0, d, sp in s.speed:
@@ -165,6 +190,10 @@ def _stats(variants: list[dict]) -> dict:
                 effects["camara_lenta"] = effects.get("camara_lenta", 0) + 1
             if s.get("texts"):
                 effects["texto"] = effects.get("texto", 0) + len(s["texts"])
+            if s.get("grade"):
+                effects[s["grade"]] = effects.get(s["grade"], 0) + 1
+            if s.get("layout"):
+                effects["paneles_" + s["layout"]] = effects.get("paneles_" + s["layout"], 0) + 1
             if s["type"] == "clip":
                 clip_beats.append(s["beats"])
     return {
@@ -311,8 +340,8 @@ def _climax_beats(var: dict) -> float:
             continue
         if sec["type"] == "clip":
             tr = sec.get("transition") or {}
-            # si entra con transición, el impacto es al terminarla
-            return pos + (tr.get("beats", 0) if tr.get("type") not in (None, "cut") else 0)
+            # si entra con transición, el impacto es al terminarla (en las centradas, en el corte)
+            return pos + (tr.get("beats", 0) if tr.get("type") not in (None, "cut", *CENTERED) else 0)
         pos += sec.get("beats", 0)
     return 0.0
 
@@ -510,6 +539,8 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
                 appear = round(min(ap * p, dur * 0.9), 3)
                 panels.append({"src": _rel(c, base), "in": inpoint(c, dur - appear), "appear": appear})
             seg = {"type": "stack", "duration": dur, "panels": panels}
+            if s_.get("layout"):
+                seg["layout"] = s_["layout"]
         else:
             c = pool[slot]
             slot += 1
@@ -526,11 +557,29 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
                 elif e["type"] == "shake":
                     fx.append({"type": "shake", "at": round(e.get("at_beats", 0) * p, 3),
                                "duration": round(min(e["beats"] * p, dur), 3), "amount": e.get("amount", 0.5)})
+                elif e["type"] == "freeze":
+                    at = round(e.get("at_beats", 0) * p, 3)
+                    if at < dur - 0.1:
+                        fx.append({"type": "freeze", "at": at, "duration": round(min(e["beats"] * p, dur - at), 3)})
+                elif e["type"] == "strobe":
+                    at = round(e.get("at_beats", 0) * p, 3)
+                    if at < dur - 0.1:
+                        fx.append({"type": "strobe", "at": at, "duration": round(min(e["beats"] * p, dur - at), 3),
+                                   "rate": round(1.0 / (e.get("period_beats", 0.25) * p), 3),
+                                   "amount": e.get("amount", 1.0), "duty": e.get("duty", 0.5),
+                                   "color": e.get("color", "black")})
+                elif e["type"] == "bw_flash":
+                    times = [round(b * p, 3) for b in e["beats"] if b * p < dur - 0.05]
+                    if times:
+                        fx.append({"type": "bw_flash", "times": times,
+                                   "duration": round(max(0.04, e.get("dur_beats", 0.25) * p), 3)})
             if s_.get("texts"):
                 H = opt.height or style.get("output", {}).get("height", 1920)
                 seg["texts"] = [{"text": tx["text"], "start": round(tx["start_beats"] * p, 3),
                                  "end": round(min(dur, tx["end_beats"] * p), 3), "x": tx["x"], "y": tx["y"],
                                  "size": max(16, int(tx["size_frac"] * H))} for tx in s_["texts"]]
+            if s_.get("grade"):
+                seg["grade"] = s_["grade"]
             if s_.get("speed"):
                 seg["speed"] = s_["speed"]
             if s_.get("ramp_beats"):
@@ -550,6 +599,8 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
         tr = s_.get("transition")
         if tr and segs:
             d = round(min(tr["beats"] * p, dur * 0.8), 3)
+            if tr["type"] in CENTERED:  # la mitad de salida va al final del plano anterior
+                d = round(min(d, segs[-1]["duration"] * 1.6), 3)
             seg["transition"] = {"type": tr["type"], "duration": d}
             if "direction" in tr:
                 seg["transition"]["direction"] = tr["direction"]

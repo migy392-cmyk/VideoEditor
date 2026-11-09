@@ -92,12 +92,12 @@ def sample(kind: str, dur: float | None = None) -> str:
 
 MOVING = {"slideleft", "slideright", "slideup", "slidedown", "smoothleft", "smoothright", "smoothup",
           "smoothdown", "zoomin", "squeezeh", "squeezev", "subject_drop", "wipeleft", "wiperight",
-          "wipeup", "wipedown", "pixelize", "hblur", "circleopen", "radial"}
+          "wipeup", "wipedown", "pixelize", "hblur", "circleopen", "radial", "zoomthrough", "whip"}
 
 
 def auto_cues(project, drop: float | None = None) -> list[dict]:
     """Coloca efectos de sonido según el montaje:
-    - whoosh en transiciones con movimiento (centrado en la transición)
+    - whoosh en transiciones con movimiento (centrado en la transición; también barridos y zooms)
     - impact cuando aterriza un subject_drop y en el drop de la canción
     - riser los 2 compases antes del drop
     - glitch donde hay efecto glitch
@@ -107,8 +107,10 @@ def auto_cues(project, drop: float | None = None) -> list[dict]:
     for i, seg in enumerate(project.segments):
         tr = seg.transition
         if i > 0 and tr.type in MOVING:
-            cues.append({"type": "whoosh", "at": max(0.0, t - 0.2), "duration": max(0.4, tr.duration + 0.3),
-                         "volume": 0.5})
+            # en zoomthrough / whip el movimiento está centrado en el corte
+            lead = 0.2 + (tr.duration / 2 if tr.centered else 0.0)
+            cues.append({"type": "whoosh", "at": max(0.0, t - lead), "duration": max(0.4, tr.duration + 0.3),
+                         "volume": 0.55 if tr.type == "whip" else 0.5})
             if tr.type == "subject_drop":
                 cues.append({"type": "impact", "at": t + tr.duration, "volume": 0.7})
         elif i > 0 and tr.type in ("flash", "fadewhite"):

@@ -58,9 +58,19 @@ TRANSITIONS = {
     "hblur": "hblur",
     # Especial: la persona del plano siguiente (recortada del fondo) entra sobre el plano actual.
     "subject_drop": "slidedown",
+    # Centradas en el corte (no hay fundido): la mitad de la duración va al final del plano
+    # anterior y la otra mitad al principio del siguiente, y el corte cae en el beat.
+    "zoomthrough": None,  # zoom que acelera hacia el corte; el plano nuevo entra ampliado y se asienta
+    "whip": None,         # barrido: desplazamiento rapidísimo con desenfoque direccional
 }
 
+# Transiciones que se resuelven con efectos a ambos lados de un corte seco
+CENTERED = ("zoomthrough", "whip")
+
 DROP_DIRECTIONS = ("top", "bottom", "left", "right")
+
+# Distribución de los paneles de un 'stack'
+LAYOUTS = ("rows", "columns", "grid")
 
 
 class ProjectError(ValueError):
@@ -71,11 +81,20 @@ class ProjectError(ValueError):
 class Transition:
     type: str = "cut"
     duration: float = 0.0
-    direction: str = "top"  # sólo subject_drop
+    direction: str = "top"  # subject_drop: desde dónde entra; whip: hacia dónde se va la imagen
 
     @property
     def xfade(self) -> str | None:
         return TRANSITIONS[self.type]
+
+    @property
+    def centered(self) -> bool:
+        return self.type in CENTERED
+
+    @property
+    def overlap(self) -> float:
+        """Segundos que se solapan los dos planos (0 en cortes y transiciones centradas en el corte)."""
+        return 0.0 if self.type == "cut" or self.centered else self.duration
 
 
 @dataclass
@@ -127,6 +146,7 @@ class Segment:
     panels: list[Source] = field(default_factory=list)
     color: str = "black"
     gap: int = 0
+    layout: str = "rows"  # sólo stack: rows (franjas), columns (columnas) o grid (cuadrícula 2 columnas)
     transition: Transition = field(default_factory=Transition)
     effects: list[Effect] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
@@ -247,7 +267,7 @@ def _transition(v: Any, where: str) -> Transition:
     if t not in TRANSITIONS:
         raise ProjectError(f"{where}: transición '{t}' desconocida. Opciones: {', '.join(TRANSITIONS)}")
     dur = 0.0 if t == "cut" else _num(v, "duration", 0.3, minimum=0.01, where=where)
-    direction = str(v.get("direction", "top"))
+    direction = str(v.get("direction", "left" if t == "whip" else "top"))
     if direction not in DROP_DIRECTIONS:
         raise ProjectError(f"{where}: 'direction' debe ser una de {', '.join(DROP_DIRECTIONS)}")
     return Transition(type=t, duration=dur, direction=direction)
@@ -354,8 +374,11 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
             texts=_texts(s.get("texts"), where),
             color=str(s.get("color", "black")),
             gap=int(s.get("gap", 0)),
+            layout=str(s.get("layout", "rows")),
             grade=s.get("grade"),
         )
+        if seg.layout not in LAYOUTS:
+            raise ProjectError(f"{where}: 'layout' debe ser uno de {', '.join(LAYOUTS)}")
         if seg.grade is not None and seg.grade not in GRADES:
             raise ProjectError(f"{where}: grade '{seg.grade}' desconocido")
         if t == "clip":
@@ -379,6 +402,9 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
         tr = segments[i].transition
         if tr.duration >= segments[i].duration:
             raise ProjectError(f"segments[{i}]: la transición ({tr.duration}s) debe ser más corta que el segmento")
+        if tr.centered and tr.duration / 2 >= segments[i - 1].duration:
+            raise ProjectError(f"segments[{i}]: la transición '{tr.type}' ({tr.duration}s) usa la mitad de su "
+                               f"duración al final del segmento anterior, que es demasiado corto")
 
     cm = data.get("color_match")
     if cm is not None:

@@ -147,14 +147,15 @@ def cmd_beats(args: argparse.Namespace) -> int:
 
 def cmd_list(_: argparse.Namespace) -> int:
     from .auto import TEMPLATES
-    from .effects import EFFECTS, GRADES
-    from .project import TRANSITIONS
+    from .effects import EFFECTS, GRADES, INTERNAL
+    from .project import LAYOUTS, TRANSITIONS
 
     print("Plantillas automáticas: " + ", ".join(TEMPLATES))
     print("Looks de color (grade): " + ", ".join(GRADES))
-    print("Efectos: " + ", ".join(EFFECTS))
+    print("Efectos: " + ", ".join(e for e in EFFECTS if e not in INTERNAL))
     print("Transiciones: " + ", ".join(TRANSITIONS))
     print("Tipos de segmento: clip, stack, black, color")
+    print("Distribución de paneles (stack.layout): " + ", ".join(LAYOUTS))
     return 0
 
 

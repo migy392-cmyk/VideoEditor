@@ -107,6 +107,7 @@ def cutout_video(inputs: list[str], chain: str, w: int, h: int, fps: int, dur: f
     """Decodifica (inputs + cadena de filtros ya preparada), recorta a la persona
     y escribe un video con alfa (FFV1 yuva420p en .mkv)."""
     ww, wh = max(64, int(w * work_scale) // 2 * 2), max(64, int(h * work_scale) // 2 * 2)
+    seg = PersonSegmenter()  # antes de lanzar ffmpeg: si falla, no quedan procesos colgados
     dec = subprocess.Popen(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", *inputs,
          "-filter_complex", f"[0:v]{chain}[o]", "-map", "[o]", "-t", f"{dur:.4f}",
@@ -117,7 +118,6 @@ def cutout_video(inputs: list[str], chain: str, w: int, h: int, fps: int, dur: f
          "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
          "-c:v", "ffv1", "-pix_fmt", "yuva420p", out_path],
         stdin=subprocess.PIPE)
-    seg = PersonSegmenter()
     frame_bytes = w * h * 3
     try:
         while True:
@@ -135,6 +135,6 @@ def cutout_video(inputs: list[str], chain: str, w: int, h: int, fps: int, dur: f
         dec.wait()
         enc.stdin.close()
         enc.wait()
-    if enc.returncode != 0 or not os.path.exists(out_path):
+    if dec.returncode not in (0, None) or enc.returncode != 0 or not os.path.exists(out_path):
         raise ff.FFmpegError("No se pudo escribir el video recortado")
     return out_path

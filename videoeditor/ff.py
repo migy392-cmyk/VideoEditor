@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from functools import lru_cache
@@ -42,8 +43,26 @@ def capture_stderr(args: list[str]) -> str:
     return proc.stderr
 
 
-@lru_cache(maxsize=256)
 def probe(path: str) -> dict:
+    """Info de ffprobe. La caché depende también del tamaño y la fecha del archivo,
+    así un archivo sobrescrito (p. ej. un render nuevo con el mismo nombre) se vuelve a leer."""
+    try:
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = (None, None)
+    return _probe(path, *key)
+
+
+def _clear_probe_cache() -> None:
+    _probe.cache_clear()
+
+
+probe.cache_clear = _clear_probe_cache  # compatibilidad con el código que limpia la caché
+
+
+@lru_cache(maxsize=256)
+def _probe(path: str, size, mtime) -> dict:
     cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:

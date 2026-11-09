@@ -595,7 +595,9 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
                 sg.setdefault("effects", []).extend([{"type": "halation", "amount": 0.3},
                                                      {"type": "film_grain", "amount": 7}])
     chosen = apply_to_project_data(project, lut, lut_strength, style=style, project_dir=base) if lut else None
-    if style.get("color") and color_strength > 0 and not (chosen and chosen.startswith("style:")):
+    # Si se elige un LUT, el LUT manda: el color aprendido por curvas se aplicaría encima y
+    # mezclaría dos looks distintos.
+    if style.get("color") and color_strength > 0 and not chosen:
         project["color_match"] = style["color"]
         project["color_strength"] = color_strength
     return project, mm

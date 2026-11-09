@@ -9,3 +9,6 @@ out/
 .ve_cache/
 workspace/
 .claude/worktrees/
+*.egg-info/
+build/
+dist/

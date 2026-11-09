@@ -1,2 +1,0 @@
-[console_scripts]
-videoeditor = videoeditor.__main__:main

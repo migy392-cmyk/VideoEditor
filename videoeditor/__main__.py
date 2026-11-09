@@ -232,6 +232,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--workspace", "-w", help=f"Carpeta de trabajo (por defecto '{DEFAULT_WORKSPACE}')")
     sub = p.add_subparsers(dest="cmd", required=True)
+    # -w/--workspace también se acepta después del subcomando (p. ej. `serve -w carpeta`)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--workspace", "-w", default=argparse.SUPPRESS,
+                        help=f"Carpeta de trabajo (por defecto '{DEFAULT_WORKSPACE}')")
+    _add_parser = sub.add_parser
+    sub.add_parser = lambda *a, **k: _add_parser(*a, parents=[common], **k)  # type: ignore[method-assign]
 
     r = sub.add_parser("render", help="Renderiza un proyecto JSON")
     r.add_argument("project")

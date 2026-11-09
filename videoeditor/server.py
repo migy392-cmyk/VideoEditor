@@ -54,11 +54,17 @@ class Jobs:
         self._jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def start(self, kind: str, fn, *args) -> str:
+    def start(self, kind: str, fn, *args, key: str | None = None) -> str:
+        """Lanza un trabajo en segundo plano. Con `key`, si ya hay uno en marcha con la misma
+        clave (p. ej. el render del mismo proyecto) no se lanza otro: se devuelve el existente."""
         jid = uuid.uuid4().hex[:10]
         job = {"id": jid, "kind": kind, "status": "running", "progress": 0.0, "log": [],
-               "result": None, "error": None, "started": time.time()}
+               "result": None, "error": None, "started": time.time(), "key": key}
         with self._lock:
+            if key:
+                for other in self._jobs.values():
+                    if other.get("key") == key and other["status"] == "running":
+                        return other["id"]
             self._jobs[jid] = job
 
         def log(msg: str) -> None:
@@ -108,7 +114,7 @@ class App:
             d = self.path(kind)
             for fn in sorted(os.listdir(d)):
                 p = os.path.join(d, fn)
-                if fn.startswith(".") or not os.path.isfile(p) or fn.endswith(".part"):
+                if fn.startswith(".") or not os.path.isfile(p) or fn.endswith(".part") or ".part." in fn:
                     continue
                 item = {"name": fn, "size": os.path.getsize(p)}
                 if kind == "luts":
@@ -126,11 +132,19 @@ class App:
 
     def thumb(self, kind: str, name: str, t: float) -> str:
         src = self.path(kind, name)
-        key = re.sub(r"[^\w]", "_", f"{kind}_{name}_{t:.2f}") + ".jpg"
+        key = re.sub(r"[^\w]", "_", f"{kind}_{name}_{t:.2f}_{self._stamp(src)}") + ".jpg"
         out = os.path.join(self.ws, "cache", key)
         if not os.path.exists(out):
-            ff.run(["-ss", f"{max(0.0, t):.2f}", "-i", src, "-frames:v", "1", "-vf", "scale=240:-2", "-q:v", "4", out])
+            tmp = out + ".part.jpg"
+            ff.run(["-ss", f"{max(0.0, t):.2f}", "-i", src, "-frames:v", "1", "-vf", "scale=240:-2", "-q:v", "4", tmp])
+            sysutil.replace_file(tmp, out)
         return out
+
+    @staticmethod
+    def _stamp(path: str) -> str:
+        """Tamaño y fecha de modificación del archivo: parte de las claves de caché."""
+        st = os.stat(path)
+        return f"{st.st_size}_{st.st_mtime_ns}"
 
     # ---------------- LUTs ----------------
     def luts(self) -> list[dict]:
@@ -145,7 +159,7 @@ class App:
             kind, value = luts.classify(spec, os.path.join(self.ws, "projects"))
             if kind == "file":
                 spec = value
-        sig = f"{clip}|{spec}|{strength:.2f}|{t:.2f}|{os.path.getmtime(src)}"
+        sig = f"{clip}|{spec}|{strength:.2f}|{t:.2f}|{self._stamp(src)}"
         if spec.startswith("style:") or os.path.isfile(spec):
             sig += f"|{self._lut_mtime(spec)}"
         key = "lut_" + hashlib.sha1(sig.encode()).hexdigest()[:16] + ".jpg"
@@ -164,9 +178,13 @@ class App:
         return os.path.getmtime(spec)
 
     def save_lut(self, dest: str) -> None:
-        """Comprueba que el archivo subido es un LUT 3D válido; si no, lo borra."""
+        """Comprueba la extensión del LUT subido y, si es .cube, que sea un LUT 3D válido; si no,
+        lo borra. (.3dl, .dat y .m3d se aceptan tal cual: ffmpeg los lee a intensidad 1.)"""
         try:
-            luts.read_cube(dest)
+            if not dest.lower().endswith(luts.LUT_EXT):
+                raise luts.LutError(f"Extensión de LUT no admitida (usa {', '.join(luts.LUT_EXT)})")
+            if dest.lower().endswith(".cube"):
+                luts.read_cube(dest)
         except luts.LutError:
             os.remove(dest)
             raise
@@ -260,7 +278,7 @@ class App:
             project = preview_project(project)
         out_name = f"{safe_name(name)}{'_preview' if preview else ''}.mp4"
         report: dict = {}
-        render(project, os.path.join(self.ws, "renders", out_name), log=log, report=report)
+        render(project, os.path.join(self.ws, "renders", out_name), log=log, report=report)  # escritura atómica
         return {"output": out_name, "duration": round(project.total_duration, 2), "qa": report}
 
     def music_map(self, music: str) -> dict:
@@ -271,14 +289,21 @@ class App:
     def beats(self, music: str, start: float, duration: float | None) -> dict:
         from .beats import detect
 
-        cache = os.path.join(self.ws, "cache", re.sub(r"[^\w]", "_", f"beats_{music}_{start}_{duration}") + ".json")
+        src = self.path("music", music)
+        cache = os.path.join(self.ws, "cache",
+                             re.sub(r"[^\w]", "_", f"beats_{music}_{start}_{duration}_{self._stamp(src)}") + ".json")
         if os.path.exists(cache):
-            with open(cache, encoding="utf-8") as f:
-                return json.load(f)
-        info = detect(self.path("music", music), start=start, duration=duration)
+            try:
+                with open(cache, encoding="utf-8") as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                pass  # caché corrupta: se recalcula
+        info = detect(src, start=start, duration=duration)
         out = {"bpm": info.bpm, "period": info.period, "beats": info.beats}
-        with open(cache, "w", encoding="utf-8") as f:
+        tmp = cache + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f)
+        sysutil.replace_file(tmp, cache)
         return out
 
 
@@ -302,6 +327,18 @@ def make_handler(app: App):
 
         def error(self, msg, status=400):
             self.send_json({"error": str(msg)}, status)
+
+        def fail(self, e: BaseException):
+            """Responde con un JSON de error a cualquier excepción (nunca una respuesta vacía)."""
+            if isinstance(e, (ValueError, ff.FFmpegError, OSError)):
+                return self.error(e)
+            if isinstance(e, KeyError):
+                return self.error(f"Falta el campo {e}")
+            traceback.print_exc()
+            msg = f"Error interno ({type(e).__name__}): {e}"
+            if isinstance(e, (TypeError, AttributeError)):
+                return self.error(f"Datos no válidos: {e}", 400)
+            return self.error(msg, 500)
 
         def read_json(self) -> dict:
             n = int(self.headers.get("Content-Length") or 0)
@@ -404,8 +441,8 @@ def make_handler(app: App):
                     dur = float(q["duration"]) if q.get("duration") else None
                     return self.send_json(app.beats(api[1], float(q.get("start", 0)), dur))
                 return self.error("No encontrado", 404)
-            except (ValueError, ff.FFmpegError, OSError) as e:
-                return self.error(e)
+            except Exception as e:  # noqa: BLE001 - siempre se responde con JSON
+                return self.fail(e)
 
         def do_PUT(self):
             u = urlparse(self.path)
@@ -438,8 +475,8 @@ def make_handler(app: App):
                     app.save_project(parts[2], self.read_json())
                     return self.send_json({"ok": True})
                 return self.error("No encontrado", 404)
-            except (ValueError, OSError) as e:  # LutError es un ValueError
-                return self.error(e)
+            except Exception as e:  # noqa: BLE001 - LutError es un ValueError
+                return self.fail(e)
 
         def do_POST(self):
             u = urlparse(self.path)
@@ -456,10 +493,11 @@ def make_handler(app: App):
                     return self.send_json({"job": app.jobs.start("create", app.create, body)})
                 if parts == ["api", "render"]:
                     return self.send_json({"job": app.jobs.start("render", app.render, body["project"],
-                                                                 bool(body.get("preview")))})
+                                                                 bool(body.get("preview")),
+                                                                 key="render:" + safe_name(body["project"]))})
                 return self.error("No encontrado", 404)
-            except (ValueError, KeyError, OSError) as e:
-                return self.error(e)
+            except Exception as e:  # noqa: BLE001
+                return self.fail(e)
 
         def do_DELETE(self):
             u = urlparse(self.path)
@@ -478,8 +516,8 @@ def make_handler(app: App):
                     os.remove(app.project_path(parts[2]))
                     return self.send_json({"ok": True})
                 return self.error("No encontrado", 404)
-            except (ValueError, OSError) as e:
-                return self.error(e)
+            except Exception as e:  # noqa: BLE001
+                return self.fail(e)
 
     return Handler
 

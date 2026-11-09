@@ -992,8 +992,8 @@ def to_template(a: Analysis) -> dict:
                 seg["grade"] = s.grade
             if s.speed:
                 seg["ramp"] = []
-                for t, d, sp in s.speed:
-                    seg["ramp"] += [[t, sp], [round(t + d, 3), 1.0]]
+                for t_sp, d_sp, sp in s.speed:
+                    seg["ramp"] += [[t_sp, sp], [round(t_sp + d_sp, 3), 1.0]]
             if s.texts:
                 seg["texts"] = [_text_spec(tx, a.height) for tx in s.texts]
             if s.glitch_at is not None:

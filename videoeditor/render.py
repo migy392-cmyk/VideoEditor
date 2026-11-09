@@ -457,11 +457,34 @@ def _sfx_cues(project: Project) -> list[dict]:
     return [c for c in cues if c["at"] < total - 0.05]
 
 
+PX_EFFECT_PARAMS = {"rgb_split": ("amount",), "blur": ("amount",)}  # valores en píxeles
+
+
 def preview_project(project: Project, scale: float = 0.5) -> Project:
+    """Versión reducida del proyecto: además de la resolución, escala los valores en píxeles
+    (tamaño de texto, separación de paneles, desplazamiento RGB, desenfoque) para que la vista
+    previa se parezca al render final."""
     o = project.output
     small = replace(o, width=_even(o.width * scale), height=_even(o.height * scale),
                     crf=max(o.crf, 26), preset="ultrafast")
-    return replace(project, output=small)
+
+    def fx(e):
+        keys = PX_EFFECT_PARAMS.get(e.type)
+        if not keys or not any(k in e.params for k in keys):
+            return e
+        params = dict(e.params)
+        for k in keys:
+            if k in params:
+                params[k] = type(params[k])(params[k] * scale) if isinstance(params[k], int) else params[k] * scale
+                if e.type == "rgb_split":
+                    params[k] = max(1, int(round(params[k])))
+        return replace(e, params=params)
+
+    segs = [replace(s, gap=int(round(s.gap * scale)),
+                    texts=[replace(t, size=max(1, int(round(t.size * scale)))) for t in s.texts],
+                    effects=[fx(e) for e in s.effects])
+            for s in project.segments]
+    return replace(project, output=small, segments=segs)
 
 
 def _make_cutouts(project: Project, tmpdir: str, log) -> dict[int, str]:
@@ -486,7 +509,7 @@ def _make_cutouts(project: Project, tmpdir: str, log) -> dict[int, str]:
             segment.cutout_video(_source_input(seg.source, tr.duration), chain, o.width, o.height,
                                  o.fps, tr.duration, path)
             out[i] = path
-        except segment.SegmentationUnavailable as e:
+        except (segment.SegmentationUnavailable, ff.FFmpegError) as e:
             log(f"  Aviso: {e}\n  Uso 'slidedown' en su lugar.")
     return out
 
@@ -522,7 +545,19 @@ def render(project: Project, out_path: str, *, verbose: bool = False, keep_temp:
         cutouts = _make_cutouts(project, tmpdir, log)
         log("  Uniendo segmentos y música…")
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-        ff.run(build_assemble_command(project, seg_files, durs, out_path, cutouts), verbose=verbose)
+        # Se escribe en un nombre temporal y se reemplaza al terminar: un render fallido o
+        # interrumpido nunca deja un mp4 a medias con el nombre final.
+        base_, ext_ = os.path.splitext(out_path)
+        part = f"{base_}.part{ext_ or '.mp4'}"
+        try:
+            ff.run(build_assemble_command(project, seg_files, durs, part, cutouts), verbose=verbose)
+            sysutil.replace_file(part, out_path)
+        finally:
+            if os.path.exists(part):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
         log(f"  Listo en {time.time() - t0:.1f}s → {out_path}")
         if qa:
             res = qa_mod.check_output(out_path, project, beats=getattr(project, "beats", None))

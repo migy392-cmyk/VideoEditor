@@ -312,6 +312,20 @@ def _fit_sections(sections: list[dict], n_clips: int, max_beats: float | None,
             if not removable:
                 break
             secs.pop(removable[-1])
+    if max_beats:
+        # Si ya solo queda un plano y aún no cabe, se acortan los demás tramos (negro, paneles…)
+        # y por último el propio plano: la duración total nunca supera la pedida.
+        floor = 0.5
+        last_clip = max((i for i, s in enumerate(secs) if s["type"] == "clip"), default=None)
+        order = [i for i, s in enumerate(secs) if s["type"] in ("black", "stack") and not s.get("until")]
+        order += [i for i, s in enumerate(secs) if s["type"] == "clip" and i != last_clip]
+        order += [last_clip] if last_clip is not None else []
+        for i in order:
+            excess = total(secs) - max_beats
+            if excess <= 1e-6:
+                break
+            cur = secs[i]["beats"]
+            secs[i]["beats"] = max(min(cur, floor), cur - excess)
     return secs
 
 
@@ -465,6 +479,21 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
     b0 = mm.beats[0]
     if lead and b0 < 0.2:  # deja un beat de negro antes de empezar, como la referencia
         b0 += p
+    start_beat = float(var.get("start_beat", 0.0))
+    if not lead:
+        # Sin negro inicial el primer plano empieza en t=0 de la edición: la música tiene que
+        # empezar justo en ese punto (un beat) para que todos los cortes caigan en beats.
+        shift = b0 + start_beat * p
+        if shift > 1e-6:
+            tgt = start + shift
+            near = min(full.beats, key=lambda b: abs(b - tgt)) if full.beats else tgt
+            start = near if abs(near - tgt) < 0.06 else tgt
+            mm = full.shifted(start)
+            if not mm.beats:
+                raise ValueError("No se encontraron beats en la canción a partir de ese punto")
+            b0 = 0.0
+            start_beat = 0.0
+        # (con shift <= 0 el primer plano ya empieza antes del inicio de la canción y se recorta en 0)
 
     # --- cuánto dura
     natural = sum(sec.get("beats", 0) for sec in var["sections"]) * p + b0
@@ -476,7 +505,6 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
     else:
         target = None  # la duración natural del estilo (más larga si hay más clips)
     max_beats = (target - b0) / p if target else None
-    start_beat = float(var.get("start_beat", 0.0))
     sections = _fit_sections(var["sections"], len(clips), max_beats, fill=follow_music and not opt.max_duration)
     if follow_music:
         sections = _pace_by_music(sections, mm, b0, p, start_beat, max_beats)

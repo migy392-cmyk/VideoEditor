@@ -362,6 +362,60 @@ EFFECTS: dict[str, EffectFn] = {
 
 INTERNAL = ("tr_zoom", "tr_whip")  # no se ofrecen al usuario
 
+# Esquema de parámetros: nombre -> ("num", mínimo, máximo) | "at" | "times" | "color".
+def _N(lo, hi):
+    return ("num", lo, hi)
+
+
+PARAMS: dict[str, dict[str, object]] = {
+    "glitch": {"at": "at", "duration": _N(0, 600), "intensity": _N(0, 20)},
+    "rgb_split": {"amount": _N(0, 1000), "at": "at", "duration": _N(0, 600)},
+    "shake": {"amount": _N(0, 10), "at": "at", "duration": _N(0, 600), "speed": _N(0, 1000)},
+    "punch": {"times": "times", "at": "at", "amount": _N(0, 5), "decay": _N(0, 10)},
+    "flash": {"times": "times", "at": "at", "amount": _N(0, 5), "decay": _N(0, 10)},
+    "fade_in": {"duration": _N(0, 600), "color": "color"},
+    "fade_out": {"duration": _N(0, 600), "color": "color"},
+    "blur": {"amount": _N(0, 500), "at": "at", "duration": _N(0, 600)},
+    "grain": {"amount": _N(0, 100)},
+    "sharpen": {"amount": _N(-2, 5)},
+    "letterbox": {"size": _N(0, 0.49)},
+    "halation": {"amount": _N(0, 1)},
+    "film_grain": {"amount": _N(0, 100)},
+    "freeze": {"at": "at", "duration": _N(0, 600)},
+    "strobe": {"at": "at", "duration": _N(0, 600), "rate": _N(0.1, 120), "amount": _N(0, 1),
+               "duty": _N(0, 1), "color": "color"},
+    "bw_flash": {"times": "times", "at": "at", "duration": _N(0, 60)},
+}
+
+
+def _isnum(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+
+def validate_effect(etype: str, params: dict, where: str) -> None:
+    """Comprueba tipos y rangos de los parámetros de un efecto (ProjectError en español)."""
+    from .project import check_color
+
+    for key, kind in PARAMS.get(etype, {}).items():
+        if key not in params or params[key] is None:
+            continue
+        v = params[key]
+        w = f"{where} ({etype}): '{key}'"
+        if kind == "at":
+            if v in ("end", "start"):
+                continue
+            if not _isnum(v) or v < 0:
+                raise ProjectError(f"{w} debe ser 'end', 'start' o un número de segundos >= 0 (recibido {v!r})")
+        elif kind == "times":
+            if not isinstance(v, (list, tuple)) or not all(_isnum(x) and x >= 0 for x in v):
+                raise ProjectError(f"{w} debe ser una lista de segundos (números >= 0) (recibido {v!r})")
+        elif kind == "color":
+            check_color(v, w)
+        else:
+            _, lo, hi = kind
+            if not _isnum(v) or not lo <= v <= hi:
+                raise ProjectError(f"{w} debe ser un número entre {lo} y {hi} (recibido {v!r})")
+
 
 def effect_filters(effects: list[Effect], seg_dur: float, w: int, h: int, fps: int) -> list[str]:
     # Las congelaciones van primero: cambian el tiempo del plano y el resto de efectos

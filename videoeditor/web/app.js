@@ -36,18 +36,22 @@ function toast(msg, err = false) {
   setTimeout(() => t.remove(), err ? 7000 : 3000);
 }
 
-function watchJob(id, box, onDone) {
+function watchJob(id, box, onDone, buttons = []) {
+  // Los botones que lanzaron el trabajo quedan desactivados hasta que termine (o falle).
+  buttons.forEach((b) => { b.disabled = true; });
+  const release = () => buttons.forEach((b) => { b.disabled = false; });
   box.innerHTML = "";
   const bar = h("div", { class: "bar" }, h("div", { style: "width:0%" }));
   const pre = h("pre");
   box.append(bar, pre);
   const tick = async () => {
     let j;
-    try { j = await api(`/api/jobs/${id}`); } catch (e) { pre.textContent = e.message; return; }
+    try { j = await api(`/api/jobs/${id}`); } catch (e) { pre.textContent = e.message; release(); return; }
     bar.firstChild.style.width = `${Math.round(j.progress * 100)}%`;
     pre.textContent = j.log.filter((l) => !/^(W0000|I0000|INFO:|WARNING: All log)/.test(l)).join("\n");
     pre.scrollTop = pre.scrollHeight;
     if (j.status === "running") return setTimeout(tick, 700);
+    release();
     if (j.status === "error") { box.append(h("div", { class: "err" }, "Error: " + j.error)); return; }
     onDone && onDone(j.result);
   };
@@ -56,7 +60,7 @@ function watchJob(id, box, onDone) {
 
 // ------------------------------------------------------------------ estado
 const S = { meta: null, luts: [], lutChoice: "none", lib: { clips: [], music: [], references: [], renders: [] }, styles: [],
-  project: null, pname: null, sel: -1, dirty: false, order: [], history: [], future: [], lastSnap: null };
+  project: null, pname: null, loaded: null, sel: -1, dirty: false, order: [], history: [], future: [], lastSnap: null };
 
 function setStatus() {
   const m = S.meta;
@@ -331,10 +335,17 @@ $("#create-btn").addEventListener("click", async () => {
   try {
     const { job } = await post("/api/create", body);
     watchJob(job, $("#create-job"), async (r) => {
+      if (S.dirty && !confirm("Hay cambios sin guardar en el proyecto abierto. ¿Descartarlos para abrir el nuevo edit?")) {
+        toast(`Edit creado: ${r.project} (elígelo en el editor)`);
+        show("editor");
+        return;
+      }
       toast("Edit creado. Abriendo el editor…");
       S.pname = r.project;
+      S.loaded = null;  // fuerza a abrir el proyecto nuevo
+      setDirty(false);
       show("editor");
-    });
+    }, [$("#create-btn")]);
   } catch (e) { toast(e.message, true); }
 });
 
@@ -347,17 +358,26 @@ async function loadProjects() {
   if (!list.length) sel.append(h("option", { value: "" }, "No hay proyectos: crea uno en «Nuevo edit»"));
   for (const p of list) sel.append(h("option", { value: p.name }, p.name));
   if (S.pname && list.some((p) => p.name === S.pname)) sel.value = S.pname;
-  if (sel.value) openProject(sel.value);
+  // Sólo se (re)abre si no hay proyecto cargado o es otro: volver a la pestaña no debe recargar
+  // desde disco (se perderían los cambios sin guardar y el historial de deshacer).
+  if (!sel.value || (S.project && S.loaded === sel.value)) return;
+  if (S.project && S.dirty && !confirm("Hay cambios sin guardar. ¿Descartarlos?")) {
+    if (S.pname && list.some((p) => p.name === S.pname)) sel.value = S.pname;
+    return;
+  }
+  try { await openProject(sel.value); } catch (e) { toast("No se pudo abrir el proyecto: " + e.message, true); }
 }
 
 $("#project-select").addEventListener("change", (e) => {
   if (S.dirty && !confirm("Hay cambios sin guardar. ¿Descartarlos?")) { e.target.value = S.pname; return; }
-  openProject(e.target.value);
+  openProject(e.target.value).catch((err) => toast("No se pudo abrir el proyecto: " + err.message, true));
 });
 
 async function openProject(name) {
+  const proj = await api(`/api/projects/${enc(name)}`);
   S.pname = name;
-  S.project = await api(`/api/projects/${enc(name)}`);
+  S.loaded = name;
+  S.project = proj;
   S.sel = -1;
   resetHistory();
   showQA(null);
@@ -469,7 +489,8 @@ function drawProjectForm() {
     field("LUT", p, "lut", "select", { options: lutOptions(p.lut), empty: "(sin LUT)", after: drawProjectForm }),
     p.lut ? field("Intensidad del LUT (0-1)", p, "lut_strength", "number", { step: "0.05", min: 0, max: 1, placeholder: "1" }) : null,
     p.color_match ? field("Copiar color aprendido (0-1)", p, "color_strength", "number", { step: "0.05", min: 0, max: 1 }) : null,
-    field("Canción", p.music, "src", "select", { options: S.lib.music.map((m) => `../music/${m.name}`), empty: "(sin música)" }),
+    field("Canción", p.music, "src", "select", { options: S.lib.music.map((m) => `../music/${m.name}`), empty: "(sin música)",
+      after: () => { if (!p.music.src) { delete p.music; drawProjectForm(); } } }),
     field("Canción: empieza en (s)", p.music, "start", "number", { step: "0.1" }),
     field("Volumen", p.music, "volume", "number", { step: "0.1", min: 0 }),
     field("Efectos de sonido automáticos", p, "sound_design", "checkbox"),
@@ -655,7 +676,9 @@ $("#snap-seg").addEventListener("click", () => {
 // ---------------- guardar y renderizar
 async function save() {
   try {
-    await api(`/api/projects/${enc(S.pname)}`, { method: "PUT", body: JSON.stringify(S.project) });
+    const body = { ...S.project };
+    if (!body.music || !body.music.src) delete body.music;  // sin canción: nada de objeto "music" a medias
+    await api(`/api/projects/${enc(S.pname)}`, { method: "PUT", body: JSON.stringify(body) });
     setDirty(false); toast("Guardado"); return true;
   } catch (e) { toast("No se pudo guardar: " + e.message, true); return false; }
 }
@@ -670,7 +693,7 @@ async function doRender(preview) {
       showQA(r.qa);
       $("#player").play().catch(() => {});
       toast(`Render listo: ${r.output}`);
-    });
+    }, [$("#preview-btn"), $("#render-btn")]);
   } catch (e) { toast(e.message, true); }
 }
 $("#preview-btn").addEventListener("click", () => doRender(true));

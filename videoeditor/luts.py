@@ -693,7 +693,14 @@ def resolve(spec: str, strength: float = 1.0, base_dir: str | None = None) -> st
     """
     kind, value = classify(spec, base_dir)
     strength = min(1.0, max(0.0, float(strength)))
-    key = (kind, value, _tag(strength), os.path.getmtime(value) if kind == "file" and os.path.exists(value) else 0)
+    extra: object = 0
+    profile = sid = None
+    if kind == "file" and os.path.exists(value):
+        extra = os.path.getmtime(value)
+    elif kind == "style":  # el perfil de color puede cambiar al volver a aprender el estilo
+        profile, sid = find_style_profile(value, base_dir)
+        extra = hashlib.sha1(repr(profile).encode()).hexdigest()[:12]
+    key = (kind, value, _tag(strength), extra)
     if key in _resolved and os.path.exists(_resolved[key]):
         return _resolved[key]
     tag = _tag(strength)
@@ -706,7 +713,6 @@ def resolve(spec: str, strength: float = 1.0, base_dir: str | None = None) -> st
             if not os.path.exists(out):
                 _write_atomic(out, preset_cube(PRESETS[value], strength))
     elif kind == "style":
-        profile, sid = find_style_profile(value, base_dir)
         h = hashlib.sha1(repr(profile).encode()).hexdigest()[:8]
         out = os.path.join(cache_dir(), f"style_{re.sub(r'[^a-z0-9_]', '_', sid.lower())}_{h}_{tag}.cube")
         if not os.path.exists(out):
@@ -715,11 +721,13 @@ def resolve(spec: str, strength: float = 1.0, base_dir: str | None = None) -> st
     else:
         if not os.path.isfile(value):
             raise LutError(f"No se encuentra el LUT: {value}")
-        if tag == "s100" and value.lower().endswith(".cube"):
-            out = value
+        if tag == "s100" and value.lower().endswith(LUT_EXT):
+            out = value  # a intensidad completa ffmpeg (lut3d) lee .cube, .3dl, .dat y .m3d directamente
         else:
             if not value.lower().endswith(".cube"):
-                raise LutError(f"Para ajustar la intensidad hace falta un .cube (recibido {os.path.basename(value)})")
+                raise LutError(f"Para usar '{os.path.basename(value)}' con intensidad menor que 1 hace falta "
+                               f"un LUT .cube (los {'/'.join(e for e in LUT_EXT if e != '.cube')} sólo "
+                               f"funcionan a intensidad 1): conviértelo a .cube o sube la intensidad a 1")
             st = os.stat(value)
             h = hashlib.sha1(f"{value}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:10]
             out = os.path.join(cache_dir(), f"user_{h}_{tag}.cube")
@@ -852,7 +860,21 @@ def apply_to_project_data(data: dict, lut: str | None, strength: float = 1.0, *,
     if lut in ("style", "learned", "aprendido"):
         if not style or not style.get("color"):
             raise LutError("Ese estilo no tiene color aprendido para generar un LUT")
-        lut = f"style:{style.get('id') or style.get('name')}"
+        sid = style.get("id") or style.get("name")
+        lut = f"style:{sid}"
+        try:  # ¿lo encontrará el render por su id (carpeta de estilos estándar)?
+            prof, _ = find_style_profile(str(sid), project_dir)
+            standard = prof == style["color"]
+        except LutError:
+            standard = False
+        if not standard:
+            # El estilo viene de una ruta cualquiera: se guarda el LUT aprendido como .cube junto
+            # al proyecto (luts/<id>.cube, ruta relativa) para que el render no dependa del estilo.
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(sid)) or "estilo"
+            cube = os.path.join(project_dir, "luts", f"{safe}.cube")
+            os.makedirs(os.path.dirname(cube), exist_ok=True)
+            _write_atomic(cube, format_cube(learned_lattice(style["color"]), f"Aprendido de {sid}"))
+            lut = os.path.relpath(cube, project_dir)
     else:
         kind, value = classify(lut, project_dir)
         if kind == "file":

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,10 +67,16 @@ TRANSITIONS = {
     "whip": None,         # barrido: desplazamiento rapidísimo con desenfoque direccional
 }
 
+# Sinónimos: se normalizan al cargar para que el audio (whoosh) y el desenfoque los reconozcan
+TRANSITION_ALIASES = {"zoom": "zoomin", "fadewhite": "flash"}
+
 # Transiciones que se resuelven con efectos a ambos lados de un corte seco
 CENTERED = ("zoomthrough", "whip")
 
 DROP_DIRECTIONS = ("top", "bottom", "left", "right")
+
+X264_PRESETS = ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower",
+                "veryslow", "placebo")
 
 # Distribución de los paneles de un 'stack'
 LAYOUTS = ("rows", "columns", "grid")
@@ -221,13 +228,27 @@ def _num(d: dict, key: str, default: float, *, minimum: float | None = None, whe
     return v
 
 
+_COLOR_RE = re.compile(r"^(?:[A-Za-z]+|#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?|0[xX][0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?)"
+                       r"(?:@(?:0?\.\d+|[01](?:\.0*)?|0x[0-9A-Fa-f]{1,2}))?$")
+
+
+def check_color(v: Any, where: str) -> str:
+    """Valida un color de ffmpeg: nombre (white), #RRGGBB, 0xRRGGBB, con @opacidad opcional."""
+    if not isinstance(v, str) or not _COLOR_RE.match(v.strip()):
+        raise ProjectError(f"{where} no es un color válido (usa un nombre como 'white', '#RRGGBB' o "
+                           f"'0xRRGGBB', con @opacidad opcional); recibido {v!r}")
+    return v.strip()
+
+
 def _resolve(base: str, path: str) -> str:
     path = os.path.expanduser(path)
     return path if os.path.isabs(path) else os.path.normpath(os.path.join(base, path))
 
 
 def _source(d: dict, base: str, where: str) -> Source:
-    if "src" not in d:
+    if not isinstance(d, dict):
+        raise ProjectError(f"{where}: debe ser un objeto con 'src'")
+    if not isinstance(d.get("src"), str) or not d["src"].strip():
         raise ProjectError(f"{where}: falta 'src'")
     focus = d.get("focus", [0.5, 0.5])
     if not (isinstance(focus, (list, tuple)) and len(focus) == 2):
@@ -237,7 +258,7 @@ def _source(d: dict, base: str, where: str) -> Source:
         inpoint=_num(d, "in", 0.0, minimum=0, where=where),
         speed=_num(d, "speed", 1.0, minimum=0.05, where=where),
         zoom=_num(d, "zoom", 1.0, minimum=1.0, where=where),
-        focus=(float(focus[0]), float(focus[1])),
+        focus=_focus(focus, where),
         appear=_num(d, "appear", 0.0, minimum=0, where=where),
         mirror=bool(d.get("mirror", False)),
         reverse=bool(d.get("reverse", False)),
@@ -246,16 +267,25 @@ def _source(d: dict, base: str, where: str) -> Source:
     )
 
 
+def _focus(f: Any, where: str) -> tuple[float, float]:
+    try:
+        return float(f[0]), float(f[1])
+    except (TypeError, ValueError):
+        raise ProjectError(f"{where}: 'focus' debe ser [x, y] con números entre 0 y 1")
+
+
 def _ramp(v: Any, where: str) -> tuple[tuple[float, float], ...]:
     if not v:
         return ()
+    if not isinstance(v, (list, tuple)):
+        raise ProjectError(f"{where}.ramp: debe ser una lista de [segundo, velocidad]")
     pts = []
     for i, p in enumerate(v):
         if isinstance(p, dict):
             p = (p.get("at", 0), p.get("speed", 1))
         try:
             t, sp = float(p[0]), float(p[1])
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, KeyError):
             raise ProjectError(f"{where}.ramp[{i}]: usa [segundo, velocidad] o {{\"at\": s, \"speed\": v}}")
         if sp < 0.05:
             raise ProjectError(f"{where}.ramp[{i}]: la velocidad mínima es 0.05")
@@ -268,9 +298,12 @@ def _transition(v: Any, where: str) -> Transition:
         return Transition()
     if isinstance(v, str):
         v = {"type": v}
+    if not isinstance(v, dict):
+        raise ProjectError(f"{where}: 'transition' debe ser un texto o un objeto {{type, duration}}")
     t = v.get("type", "cut")
     if t not in TRANSITIONS:
         raise ProjectError(f"{where}: transición '{t}' desconocida. Opciones: {', '.join(TRANSITIONS)}")
+    t = TRANSITION_ALIASES.get(t, t)  # sinónimos -> nombre canónico (zoom, fadewhite)
     dur = 0.0 if t == "cut" else _num(v, "duration", 0.3, minimum=0.01, where=where)
     direction = str(v.get("direction", "left" if t == "whip" else "top"))
     if direction not in DROP_DIRECTIONS:
@@ -281,23 +314,34 @@ def _transition(v: Any, where: str) -> Transition:
 def _effects(lst: Any, where: str) -> list[Effect]:
     from .effects import EFFECTS  # import diferido para evitar ciclos
 
+    from .effects import validate_effect
+
+    if lst is not None and not isinstance(lst, (list, tuple)):
+        raise ProjectError(f"{where}: 'effects' debe ser una lista")
     out = []
     for i, e in enumerate(lst or []):
         if isinstance(e, str):
             e = {"type": e}
+        if not isinstance(e, dict):
+            raise ProjectError(f"{where}.effects[{i}]: debe ser un objeto con 'type' o el nombre del efecto")
         t = e.get("type")
         if t not in EFFECTS:
             raise ProjectError(f"{where}.effects[{i}]: efecto '{t}' desconocido. Opciones: {', '.join(EFFECTS)}")
+        validate_effect(t, e, f"{where}.effects[{i}]")
         out.append(Effect(type=t, params={k: v for k, v in e.items() if k != "type"}))
     return out
 
 
 def _texts(lst: Any, where: str) -> list[Text]:
+    if lst is not None and not isinstance(lst, (list, tuple)):
+        raise ProjectError(f"{where}: 'texts' debe ser una lista")
     out = []
     for i, t in enumerate(lst or []):
         if isinstance(t, str):
             t = {"text": t}
         w = f"{where}.texts[{i}]"
+        if not isinstance(t, dict):
+            raise ProjectError(f"{w}: debe ser un objeto con 'text' o un texto")
         if "text" not in t:
             raise ProjectError(f"{w}: falta 'text'")
         out.append(Text(
@@ -307,7 +351,7 @@ def _texts(lst: Any, where: str) -> list[Text]:
             x=_num(t, "x", 0.5, where=w),
             y=_num(t, "y", 0.5, where=w),
             size=int(_num(t, "size", 72, minimum=1, where=w)),
-            color=str(t.get("color", "white")),
+            color=check_color(t.get("color", "white"), f"{w}: 'color'"),
             font=str(t.get("font", "Sans:style=Bold")),
             box=bool(t.get("box", False)),
         ))
@@ -320,7 +364,11 @@ def _sfx_list(v: Any) -> list[dict] | None:
     if not v:
         return None
     out = []
+    if not isinstance(v, (list, tuple)):
+        raise ProjectError("sfx debe ser una lista")
     for i, c in enumerate(v):
+        if not isinstance(c, dict):
+            raise ProjectError(f"sfx[{i}]: debe ser un objeto con 'type' y 'at'")
         if c.get("type") not in TYPES:
             raise ProjectError(f"sfx[{i}]: tipo '{c.get('type')}' desconocido. Opciones: {', '.join(TYPES)}")
         out.append({"type": c["type"], "at": _num(c, "at", 0, minimum=0, where=f"sfx[{i}]"),
@@ -358,14 +406,37 @@ def _lut_strength(v: Any, where: str) -> float:
 def parse_project(data: dict, base_dir: str = ".") -> Project:
     from .effects import GRADES
 
-    o = data.get("output", {})
+    if not isinstance(data, dict):
+        raise ProjectError("El proyecto debe ser un objeto JSON")
+    o = data.get("output")
+    o = {} if o is None else o
+    if not isinstance(o, dict):
+        raise ProjectError("'output' debe ser un objeto {width, height, fps, crf, preset}")
+
+    def _int(key, default, lo, hi=None):
+        v = o.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            raise ProjectError(f"output.{key} debe ser un número (recibido {v!r})")
+        try:
+            n = float(v)
+        except ValueError:
+            raise ProjectError(f"output.{key} debe ser un número (recibido {v!r})")
+        if n != n or n in (float("inf"), float("-inf")) or n != int(n) and key != "fps":
+            raise ProjectError(f"output.{key} debe ser un número entero (recibido {v!r})")
+        if n < lo or (hi is not None and n > hi):
+            rng = f"entre {lo} y {hi}" if hi is not None else f"mayor o igual que {lo}"
+            raise ProjectError(f"output.{key} debe estar {rng} (recibido {v!r})")
+        return int(round(n))
+
     output = Output(
-        width=int(o.get("width", 1080)),
-        height=int(o.get("height", 1920)),
-        fps=int(o.get("fps", 30)),
-        crf=int(o.get("crf", 18)),
+        width=_int("width", 1080, 2),
+        height=_int("height", 1920, 2),
+        fps=_int("fps", 30, 1, 240),
+        crf=_int("crf", 18, 0, 51),
         preset=str(o.get("preset", "medium")),
     )
+    if output.preset not in X264_PRESETS:
+        raise ProjectError(f"output.preset '{output.preset}' desconocido. Opciones: {', '.join(X264_PRESETS)}")
     if output.width % 2 or output.height % 2:
         raise ProjectError("output.width y output.height deben ser pares")
 
@@ -374,10 +445,15 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
         raise ProjectError(f"grade '{grade}' desconocido. Opciones: {', '.join(GRADES)}")
 
     music = None
-    if data.get("music"):
-        m = data["music"]
-        if isinstance(m, str):
-            m = {"src": m}
+    m = data.get("music")
+    if isinstance(m, str):
+        m = {"src": m}
+    if m is not None and not isinstance(m, dict):
+        raise ProjectError("'music' debe ser un objeto {src, start, ...} o la ruta de la canción")
+    # Un objeto 'music' sin 'src' (p. ej. el editor con "(sin música)") equivale a no tener música.
+    if m and m.get("src"):
+        if not isinstance(m["src"], str):
+            raise ProjectError("music.src debe ser un texto (ruta de la canción)")
         music = Music(
             src=_resolve(base_dir, m["src"]),
             start=_num(m, "start", 0.0, minimum=0, where="music"),
@@ -390,10 +466,14 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
     segs_raw = data.get("segments")
     if not segs_raw:
         raise ProjectError("El proyecto no tiene 'segments'")
+    if not isinstance(segs_raw, list):
+        raise ProjectError("'segments' debe ser una lista")
 
     segments: list[Segment] = []
     for i, s in enumerate(segs_raw):
         where = f"segments[{i}]"
+        if not isinstance(s, dict):
+            raise ProjectError(f"{where}: debe ser un objeto con 'type'")
         t = s.get("type", "clip")
         if t not in SEGMENT_TYPES:
             raise ProjectError(f"{where}: tipo '{t}' desconocido. Opciones: {', '.join(SEGMENT_TYPES)}")
@@ -403,8 +483,8 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
             transition=_transition(s.get("transition"), where),
             effects=_effects(s.get("effects"), where),
             texts=_texts(s.get("texts"), where),
-            color=str(s.get("color", "black")),
-            gap=int(s.get("gap", 0)),
+            color=check_color(s.get("color", "black"), f"{where}: 'color'"),
+            gap=int(_num(s, "gap", 0, minimum=0, where=where)),
             layout=str(s.get("layout", "rows")),
             grade=s.get("grade"),
         )
@@ -420,6 +500,8 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
             seg.source = _source(s, base_dir, where)
         elif t == "stack":
             panels = s.get("panels") or []
+            if not isinstance(panels, list):
+                raise ProjectError(f"{where}: 'panels' debe ser una lista")
             if len(panels) < 2:
                 raise ProjectError(f"{where}: un 'stack' necesita al menos 2 paneles")
             seg.panels = [_source(p, base_dir, f"{where}.panels[{j}]") for j, p in enumerate(panels)]

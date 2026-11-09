@@ -64,6 +64,33 @@ def _fix_source(src: Source, dur: float, warn: list[str], where: str) -> Source:
     return src
 
 
+def check_project(project: Project) -> list[str]:
+    """Avisos sobre el proyecto que no se pueden corregir solos (música corta, transiciones que se pisan)."""
+    warn: list[str] = []
+    m = project.music
+    total = project.total_duration
+    if m:
+        try:
+            mdur = ff.duration(m.src)
+        except ff.FFmpegError:
+            mdur = None
+        if mdur is not None:
+            if m.start >= mdur - 0.05:
+                warn.append(f"La música empieza en {m.start:.2f}s, más allá del final de la canción "
+                            f"({mdur:.2f}s): el video saldrá sin sonido")
+            elif mdur - m.start < total - 0.05:
+                warn.append(f"La música ({mdur - m.start:.2f}s desde el segundo {m.start:.2f}) es más corta que "
+                            f"el video ({total:.2f}s): el final quedará en silencio")
+    segs = project.segments
+    for i in range(1, len(segs) - 1):
+        a, b = segs[i].transition, segs[i + 1].transition
+        if a.centered and b.centered and a.duration / 2 + b.duration / 2 > segs[i].duration + 1e-6:
+            warn.append(f"Segmento {i + 1}: las transiciones '{a.type}' y '{b.type}' se solapan dentro de un plano "
+                        f"de {segs[i].duration:.2f}s (necesitan {a.duration / 2 + b.duration / 2:.2f}s); "
+                        f"alarga el plano o acorta las transiciones")
+    return warn
+
+
 def preflight(project: Project) -> tuple[Project, list[str]]:
     """Revisa y corrige el proyecto antes de renderizar. Devuelve (proyecto corregido, avisos)."""
     warn: list[str] = []
@@ -84,6 +111,7 @@ def preflight(project: Project) -> tuple[Project, list[str]]:
                     hdr_seen.add(p.src)
             seg = replace(seg, panels=panels)
         segs.append(seg)
+    warn += check_project(project)
     for h in sorted(hdr_seen):
         name = os.path.basename(h.replace("\\", "/"))
         warn.append(f"{name} es HDR (iPhone): se convierte a SDR con mapeo de tonos para que no salga lavado")

@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 
 from videoeditor import ff
 from videoeditor.analyze import analyze, to_template
@@ -335,6 +336,223 @@ class EditorTests(unittest.TestCase):
         self.assertLess(rep["check"]["stats"]["peak_db"], -0.1)
 
 
+def _frame_rgb(path, t):
+    """Color medio (R, G, B, 0-255) del fotograma en el segundo t."""
+    import numpy as np
+
+    raw = ff.capture(["-ss", f"{t:.3f}", "-i", path, "-frames:v", "1", "-vf", "scale=32:-2,format=rgb24",
+                      "-f", "rawvideo", "-"])
+    return np.frombuffer(raw, np.uint8).reshape(-1, 3).mean(axis=0)
+
+
+@unittest.skipUnless(HAS_FFMPEG, "ffmpeg no instalado")
+class LutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp(prefix="ve_lut_")
+        cls.clip = os.path.join(cls.dir, "c.mp4")
+        _make_clip(cls.clip, "testsrc2", dur=3.0)
+        cls.music = os.path.join(cls.dir, "music.m4a")
+        _make_music(cls.music)
+        os.environ["VIDEOEDITOR_LUT_CACHE"] = os.path.join(cls.dir, "lutcache")
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("VIDEOEDITOR_LUT_CACHE", None)
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def project(self, segments, **extra):
+        data = {"output": {"width": 180, "height": 320, "fps": 15, "crf": 30, "preset": "ultrafast"},
+                "segments": segments, **extra}
+        return parse_project(data, self.dir)
+
+    def rend(self, name, segments, **extra):
+        out = os.path.join(self.dir, name + ".mp4")
+        render(self.project(segments, **extra), out, log=lambda *_: None, qa=False)
+        return out
+
+    def test_cube_files_are_valid(self):
+        import numpy as np
+        from videoeditor import luts
+
+        self.assertGreaterEqual(len(luts.PRESETS), 8)
+        ident = luts.identity_lattice()
+        self.assertEqual(ident.shape, (33 ** 3, 3))
+        self.assertAlmostEqual(ident[1, 0], 1 / 32)  # el rojo varía más rápido
+        self.assertEqual(ident[1, 1], 0.0)
+        diag_idx = [i * (33 * 33 + 33 + 1) for i in range(33)]
+        for look in luts.PRESETS.values():
+            self.assertTrue(look.name and look.description, look.id)
+            text = luts.preset_cube(look)
+            lines = [ln for ln in text.splitlines() if ln and not ln.startswith(("#", "TITLE", "LUT_", "DOMAIN"))]
+            self.assertEqual(len(lines), 33 ** 3, look.id)
+            self.assertIn("LUT_3D_SIZE 33", text)
+            size, arr = luts.parse_cube(text)
+            self.assertEqual(size, 33)
+            self.assertTrue(((arr >= 0) & (arr <= 1)).all(), look.id)
+            # la diagonal de grises sube (con algo de tolerancia): no hay inversiones fuertes
+            diag = arr[diag_idx] @ luts.LUMA
+            self.assertGreater(diag[-1], diag[0] + 0.3, look.id)
+            self.assertGreater(np.diff(diag).min(), -0.02, look.id)
+            # el .cube publicado en videoeditor/luts coincide con el generado
+            _, shipped = luts.read_cube(os.path.join(luts.SHIPPED_DIR, f"{look.id}.cube"))
+            self.assertLess(np.abs(shipped - arr).max(), 1e-5, f"regenera con python -m videoeditor.luts ({look.id})")
+            # con intensidad 0 es la identidad exacta; a 0.5, el punto medio
+            self.assertLess(np.abs(look.lattice(0.0) - ident).max(), 1e-12)
+            self.assertLess(np.abs(look.lattice(0.5) - (ident + arr) / 2).max(), 1e-3)
+        with self.assertRaises(luts.LutError):
+            luts.parse_cube("LUT_3D_SIZE 2\n0 0 0\n")
+
+    def test_luminance_not_crushed(self):
+        """Sobre material oscuro los looks no deben aplastar la imagen a negro."""
+        import numpy as np
+        from videoeditor import luts
+
+        rng = np.random.default_rng(1)
+        px = np.clip(rng.gamma(2.0, 0.045, (4000, 3)), 0, 1)  # escena nocturna: media ~0.09
+        y0 = float((px @ luts.LUMA).mean())
+        for look in luts.PRESETS.values():
+            y = float((look.apply(px) @ luts.LUMA).mean())
+            self.assertGreater(y, 0.45 * y0, look.id)  # phonk_rojo aplasta a propósito, pero no todo
+            self.assertLess(y, 4 * y0 + 0.1, look.id)
+
+    def test_learned_lut(self):
+        import numpy as np
+        from videoeditor import luts
+        from videoeditor.style import find_style
+
+        color = find_style("gym_noche", None)["color"]
+        lat = luts.learned_lattice(color)
+        self.assertTrue(((lat >= 0) & (lat <= 1)).all())
+        diag = lat[[i * (33 * 33 + 33 + 1) for i in range(33)]] @ luts.LUMA
+        self.assertTrue((np.diff(diag) >= -1e-9).all())
+        hi = lat[28 * (33 * 33 + 33 + 1)]  # gris claro: el estilo tiene luces cálidas (R > B)
+        self.assertGreater(hi[0], hi[2])
+        size, _ = luts.parse_cube(luts.learned_lut(color))
+        self.assertEqual(size, 33)
+        with self.assertRaises(luts.LutError):
+            luts.learned_lattice({"r": [0.1, 0.2]})
+
+    def test_all_presets_render_and_black_is_untouched(self):
+        from videoeditor import luts
+
+        segs = [{"type": "black", "duration": 0.4}]
+        for i, pid in enumerate(luts.PRESETS):
+            segs.append({"type": "clip", "src": self.clip, "in": 0.1 * i, "duration": 0.4, "lut": pid})
+        out = self.rend("all_presets", segs, lut="mate_film")  # mate_film levanta los negros
+        self.assertAlmostEqual(ff.duration(out), 0.4 * len(segs), delta=0.2)
+        self.assertLess(_frame_rgb(out, 0.2).max(), 6)  # el segmento negro no se tiñe
+        out = self.rend("stack_lut", [{"type": "stack", "duration": 1.0, "gap": 20, "color": "black", "panels": [
+            {"src": self.clip}, {"src": self.clip}]}], lut="mate_film")
+        self.assertGreater(ff.duration(out), 0.9)
+
+    def test_strength_and_override(self):
+        import numpy as np
+
+        def seg(**kw):
+            return [{"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0, **kw}]
+
+        base = self.rend("no_lut", seg())
+        zero = self.rend("zero", seg(), lut="teal_orange", lut_strength=0.0)
+        half = self.rend("half", seg(), lut="teal_orange", lut_strength=0.5)
+        full = self.rend("full", seg(), lut="teal_orange")
+        b, z, h_, f = (_frame_rgb(p, 0.5) for p in (base, zero, half, full))
+        self.assertLess(np.abs(b - z).max(), 1.5)  # intensidad 0 = sin cambios
+        d_half, d_full = np.abs(h_ - b).sum(), np.abs(f - b).sum()
+        self.assertGreater(d_full, 10)
+        self.assertGreater(d_half, 0.15 * d_full)
+        self.assertLess(d_half, d_full)
+        # override por segmento: "none" y null desactivan; otro preset lo cambia
+        segs = [{"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0, "lut": "none"},
+                {"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0, "lut": None},
+                {"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0},
+                {"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0, "lut": "oro_gym", "lut_strength": 0.7}]
+        p = self.project(segs, lut="teal_orange")
+        self.assertEqual([s.lut for s in p.segments], ["none", "none", None, "oro_gym"])
+        out = self.rend("override", segs, lut="teal_orange")
+        c = [_frame_rgb(out, t) for t in (0.5, 1.5, 2.5, 3.5)]
+        self.assertLess(np.abs(c[0] - b).max(), 1.5)
+        self.assertLess(np.abs(c[1] - b).max(), 1.5)
+        self.assertLess(np.abs(c[2] - f).max(), 3)
+        self.assertGreater(np.abs(c[3] - f).sum(), 8)
+
+    def test_validation_and_compat(self):
+        from videoeditor import luts
+        from videoeditor.project import check_sources
+
+        seg = [{"type": "black", "duration": 1}]
+        for bad in ({"lut": "no_existe"}, {"lut": "style:no_existe_xyz"}, {"lut": 5}, {"lut": "algo.txt"},
+                    {"lut": "noche_azul", "lut_strength": 1.5}, {"lut": "noche_azul", "lut_strength": "mucho"}):
+            with self.assertRaises(ProjectError, msg=str(bad)):
+                self.project(seg, **bad)
+        with self.assertRaises(ProjectError) as cm:
+            self.project([{"type": "black", "duration": 1, "lut": "x_no"}])
+        self.assertIn("segments[0]", str(cm.exception))
+        self.assertIn("noche_azul", str(cm.exception))  # sugiere los presets
+        with self.assertRaises(ProjectError):
+            self.project([{"type": "black", "duration": 1, "lut_strength": -1}])
+        p = self.project(seg, lut="noche_azul", lut_strength=0.4)
+        self.assertEqual((p.lut, p.lut_strength), ("noche_azul", 0.4))
+        self.assertIsNone(self.project(seg).lut)
+        self.assertEqual(self.project(seg).lut_strength, 1.0)
+        self.assertIsNone(self.project(seg, lut="none").lut)
+        # compatibilidad: "lut": "ruta.cube" sigue siendo una ruta relativa al JSON
+        shutil.copy(os.path.join(luts.SHIPPED_DIR, "acero_frio.cube"), os.path.join(self.dir, "mi_look.cube"))
+        p = self.project(seg, lut="mi_look.cube")
+        self.assertEqual(p.lut, os.path.join(self.dir, "mi_look.cube"))
+        self.assertEqual(check_sources(p), [])
+        p = self.project(seg, lut="falta.cube")
+        self.assertEqual(check_sources(p), [os.path.join(self.dir, "falta.cube")])
+
+    def test_path_escaping_and_user_lut_strength(self):
+        import numpy as np
+        from videoeditor import luts
+
+        weird = os.path.join(self.dir, "mi look: [rojo], 'v2'.cube")
+        shutil.copy(os.path.join(luts.SHIPPED_DIR, "phonk_rojo.cube"), weird)
+        seg = [{"type": "clip", "src": self.clip, "in": 0.5, "duration": 1.0}]
+        base = self.rend("esc_base", seg)
+        full = self.rend("esc_full", seg, lut=weird)
+        half = self.rend("esc_half", seg, lut=weird, lut_strength=0.5)
+        b, f, h_ = (_frame_rgb(p, 0.5) for p in (base, full, half))
+        self.assertGreater(np.abs(f - b).sum(), 10)
+        self.assertLess(np.abs(h_ - b).sum(), np.abs(f - b).sum())
+        self.assertEqual(luts.resolve(weird, 1.0), weird)
+        self.assertTrue(luts.resolve(weird, 0.5).startswith(luts.cache_dir()))
+
+    def test_apply_style_with_lut(self):
+        from videoeditor.style import find_style
+
+        style = find_style("gym_noche", None)
+        data, _ = apply_style(style, [self.clip, self.clip], self.music, AutoOptions(), self.dir,
+                              lut="teal_orange", lut_strength=0.7)
+        self.assertEqual((data["lut"], data["lut_strength"]), ("teal_orange", 0.7))
+        self.assertIn("color_match", data)
+        data, _ = apply_style(style, [self.clip, self.clip], self.music, AutoOptions(), self.dir, lut="style")
+        self.assertEqual(data["lut"], "style:gym_noche")
+        self.assertNotIn("color_match", data)  # el LUT aprendido ya lleva el color del estilo
+        data["output"] = {"width": 180, "height": 320, "fps": 15, "crf": 30, "preset": "ultrafast"}
+        out = os.path.join(self.dir, "style_lut.mp4")
+        render(parse_project(data, self.dir), out, log=lambda *_: None, qa=False)
+        self.assertGreater(ff.duration(out), 1.0)
+
+    def test_cli(self):
+        import contextlib
+        import io
+
+        from videoeditor.__main__ import main
+
+        sheet = os.path.join(self.dir, "sheet.jpg")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(main(["-w", self.dir, "luts"]), 0)
+            self.assertEqual(main(["luts", "--export", os.path.join(self.dir, "exp")]), 0)
+            self.assertEqual(main(["lut-preview", self.clip, "-o", sheet, "--at", "1", "--width", "90"]), 0)
+        self.assertIn("noche_azul", buf.getvalue())
+        self.assertEqual(len([f for f in os.listdir(os.path.join(self.dir, "exp")) if f.endswith(".cube")]), 9)
+        self.assertGreater(os.path.getsize(sheet), 2000)
+
+
 @unittest.skipUnless(HAS_FFMPEG, "ffmpeg no instalado")
 class ServerTests(unittest.TestCase):
     def test_api_flow(self):
@@ -391,6 +609,33 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(len(r.read()), 100)
             with self.assertRaises(urllib.error.HTTPError):
                 call("PUT", "/api/projects/t", {"segments": [{"type": "nope", "duration": 1}]})
+
+            # LUTs: listado, subida de .cube propios, miniaturas y creación con LUT
+            luts_list = call("GET", "/api/luts")
+            ids = [item["id"] for item in luts_list]
+            self.assertIn("noche_azul", ids)
+            self.assertIn("style:gym_noche", ids)
+            self.assertGreaterEqual(len([i for i in luts_list if i["kind"] == "preset"]), 8)
+            from videoeditor import luts as luts_mod
+            with open(os.path.join(luts_mod.SHIPPED_DIR, "oro_gym.cube"), "rb") as f:
+                call("PUT", "/api/upload/luts/mio.cube", raw=f.read())
+            with self.assertRaises(urllib.error.HTTPError):
+                call("PUT", "/api/upload/luts/roto.cube", raw=b"esto no es un LUT")
+            self.assertFalse(os.path.exists(os.path.join(ws, "luts", "roto.cube")))
+            user = [i for i in call("GET", "/api/luts") if i["kind"] == "user"]
+            self.assertEqual([u["id"] for u in user], ["mio.cube"])
+            self.assertEqual(len(call("GET", "/api/library")["luts"]), 1)
+            for spec in ("none", "noche_azul", "style:gym_noche", user[0]["value"]):
+                with urllib.request.urlopen(url + f"/api/lut-thumb/c0.mp4?lut={urllib.parse.quote(spec)}&strength=0.8&t=1") as r:
+                    self.assertEqual(r.headers["Content-Type"], "image/jpeg")
+                    self.assertGreater(len(r.read()), 500)
+            with self.assertRaises(urllib.error.HTTPError):
+                urllib.request.urlopen(url + "/api/lut-thumb/c0.mp4?lut=no_existe")
+            res = wait(call("POST", "/api/create", {"clips": [f"c{i}.mp4" for i in range(4)], "music": "song.m4a",
+                                                    "template": "beat_cuts", "duration": 4, "name": "t2",
+                                                    "lut": user[0]["value"], "lut_strength": 0.6})["job"])
+            proj = call("GET", f"/api/projects/{res['project']}")
+            self.assertEqual((proj["lut"], proj["lut_strength"]), ("../luts/mio.cube", 0.6))
         finally:
             httpd.shutdown()
             shutil.rmtree(ws, ignore_errors=True)

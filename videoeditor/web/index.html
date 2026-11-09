@@ -41,6 +41,13 @@
         <ul class="items"></ul>
       </div>
     </div>
+    <div class="panel" data-kind="luts">
+      <h2>LUTs</h2>
+      <p class="muted">Tus looks de color en formato <b>.cube</b> (3D). Además de los incluidos
+        (ver «Nuevo edit»), los tuyos aparecerán junto a ellos para aplicarlos a un edit.</p>
+      <label class="drop">Arrastra o elige archivos .cube<input type="file" multiple accept=".cube"></label>
+      <ul class="items"></ul>
+    </div>
     <div class="panel">
       <h2>Renders</h2>
       <ul class="items" id="renders-list"></ul>
@@ -94,6 +101,13 @@
         </label>
       </div>
       <div id="create-music-map"></div>
+      <h3>LUT de color <span class="muted">(look aplicado a todos los planos; la vista previa usa tu primer clip)</span></h3>
+      <div class="row">
+        <label class="inline">Intensidad
+          <input id="create-lut-strength" type="range" min="0" max="1" step="0.05" value="1">
+          <span id="create-lut-val" class="muted">100%</span></label>
+      </div>
+      <div id="create-luts" class="thumbs lut-grid"></div>
       <h3>Clips <span class="muted">(haz clic en el orden que quieras; el número indica la posición)</span></h3>
       <div id="create-clips" class="thumbs"></div>
       <div class="row">

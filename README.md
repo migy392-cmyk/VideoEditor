@@ -70,7 +70,7 @@ Todo se guarda en la carpeta `workspace/` (cámbiala con `-w otra_carpeta`).
    "receta" del estilo: planos, paneles, transiciones y efectos medidos en beats.
    Si aprendes con un nombre que ya existe, el video se añade como otra variante
    del mismo estilo y el color se promedia.
-3. **Nuevo edit**: elige estilo, canción y clips (en orden), y pulsa *Crear edit*. Verás el
+3. **Nuevo edit**: elige estilo, canción y clips (en orden), un **LUT** de color (miniaturas) y pulsa *Crear edit*. Verás el
    mapa de la canción. Opciones: editar según la canción, zooms y flashes automáticos,
    efectos de sonido y look de cine.
 4. **Editor**: línea de tiempo con los beats de la canción. Haz clic en un segmento
@@ -125,6 +125,87 @@ python -m videoeditor analyze ref.mov --template plantilla.json   # informe + pr
 
 El estilo **Gym noche** viene incluido: es el que se aprendió del video de referencia original.
 
+## LUTs de color
+
+Un **LUT** es una tabla que cambia los colores de todo el video de golpe (un «filtro» de color
+profesional). El editor trae **9 looks hechos para edits de gym de noche** (oscuros, con luces LED
+azules/moradas, tungsteno cálido y ropa negra), los genera con `numpy` y los aplica con el filtro
+`lut3d` de FFmpeg, así que no hacen más lento el render. Cada preset se compone de operaciones
+simples (curva de contraste en la luminancia, negros levantados, caída de las luces, tintes en
+sombras y luces, ajustes de saturación por tono y mezcla de canales) y **protege los tonos de piel**
+en los looks donde importa. Probados sobre clips oscuros: ninguno aplasta la imagen a negro.
+
+| Id | Nombre | Qué hace |
+|---|---|---|
+| `noche_azul` | Noche azul | El look de Gym noche: sombras azuladas, luces cálidas, contraste alto |
+| `acero_frio` | Acero frío | Gris azulado desaturado y duro, como metal bajo luz fría |
+| `oro_gym` | Oro gym | Luces doradas de tungsteno y sombras profundas, gimnasio de los 90 |
+| `teal_orange` | Teal y naranja | El clásico de cine: sombras verde azuladas y piel naranja |
+| `bleach_bypass` | Bleach bypass | Crudo y granuloso: poca saturación, contraste alto |
+| `phonk_rojo` | Phonk rojo | Agresivo: negros aplastados, acentos rojos y magenta, azules hacia violeta |
+| `mate_film` | Mate film | Negros levantados y color desvaído de película mate |
+| `monocromo_contraste` | Monocromo contraste | Blanco y negro duro, negros profundos y luces limpias |
+| `neon_morado` | Neón morado | Luces LED violeta y rosa; azules hacia violeta, negros morados |
+
+Además hay dos formas de LUT **aprendido**:
+
+- `style:<estilo>` (p. ej. `style:gym_noche`): el color de un estilo aprendido convertido en LUT. Lleva una
+  toma «neutra típica» hacia la distribución de color (cuantiles RGB) del estilo: la luminancia con una curva
+  monótona (copia el contraste en *stops*; el brillo medio sólo la sigue en parte para no apagar el material)
+  y, en cada nivel de brillo, la dominante de color (sombras azuladas, luces cálidas…). En la web aparece como
+  «Aprendido del estilo». Con un LUT aprendido no se usa además el «Copiar color» por curvas.
+- `python -m videoeditor lut-learn referencia.mov -o mi_look.cube [--neutral mi_clip.mp4]`: un LUT `.cube`
+  hecho directamente de un video de referencia; con `--neutral` lleva *tu* material hacia el de la referencia.
+
+### Intensidad
+
+`lut_strength` va de 0 (sin cambios) a 1 (el look completo) y mezcla identidad→look. La mezcla se guarda
+ya calculada en una caché (`~/.cache/videoeditor/luts`), así que al renderizar sólo se aplica `lut3d`.
+
+### En la interfaz web
+
+- **Nuevo edit**: elige un LUT en la cuadrícula de miniaturas (se ven sobre tu primer clip elegido, o el
+  primero de la biblioteca; «Sin LUT» y «Aprendido del estilo» incluidos) y ajusta la intensidad.
+- **Editor → Proyecto**: LUT e intensidad de todo el edit. **Segmento**: «LUT propio» (otro LUT, «Sin LUT» o
+  el del proyecto) e intensidad.
+- **Biblioteca → LUTs**: sube tus propios `.cube`; aparecen junto a los presets en todos los selectores.
+
+### En la línea de comandos
+
+```bash
+python -m videoeditor luts                              # lista presets, tus LUTs y los aprendidos
+python -m videoeditor luts --export mis_luts/           # escribe todos los presets como .cube
+python -m videoeditor lut-preview clip.mp4 -o hoja.jpg --at 1.5   # hoja de contacto con todos
+python -m videoeditor lut-preview clip.mp4 --luts noche_azul,oro_gym -o comparar.jpg
+python -m videoeditor auto --style "Gym noche" --music cancion.mp3 --lut noche_azul --lut-strength 0.8 c1.mov c2.mov
+python -m videoeditor auto --style "Gym noche" --lut style ...   # el LUT aprendido del estilo
+```
+
+### En el proyecto JSON
+
+```jsonc
+{
+  "lut": "noche_azul",        // preset, "style:<estilo>" o ruta a un .cube (como siempre)
+  "lut_strength": 0.8,        // 0..1 (por defecto 1)
+  "segments": [
+    {"type": "clip", "src": "a.mov", "duration": 2.0},                          // usa el del proyecto
+    {"type": "clip", "src": "b.mov", "duration": 2.0, "lut": "oro_gym", "lut_strength": 0.6},
+    {"type": "clip", "src": "c.mov", "duration": 2.0, "lut": "none"}            // sin LUT (también null)
+  ]
+}
+```
+
+El LUT se aplica **a cada plano** (como el look de color), no a los segmentos negros/de color ni al fondo
+de los paneles apilados. Un `"lut": "ruta.cube"` de proyectos anteriores sigue funcionando; las rutas
+relativas se leen desde el JSON o desde la carpeta `luts/` de la carpeta de trabajo.
+
+### Usarlos en otras apps (CapCut, Premiere, DaVinci Resolve…)
+
+Los presets están en [`videoeditor/luts/`](videoeditor/luts) como `.cube` estándar 33×33×33 (Adobe/Resolve).
+Impórtalos como LUT en tu editor, o exporta una copia con `python -m videoeditor luts --export carpeta/`.
+Si cambias los looks en `videoeditor/luts.py`, regenera los archivos con `python -m videoeditor.luts`
+(un test comprueba que los publicados coinciden con el código).
+
 ## Uso desde la línea de comandos
 
 ### Edit automático con plantilla fija
@@ -148,6 +229,7 @@ Opciones útiles de `auto`:
 - `--duration 15` duración máxima · `--music-start 32.5` empezar la canción en el drop
 - `--keep-order` respetar el orden de los clips · `--color-strength 0.8`
 - `--grade night_blue|teal_orange|moody|warm|cold|bw|vivid|faded|film|none`
+- `--lut ID` y `--lut-strength 0.8` LUT de color (ver [LUTs de color](#luts-de-color))
 - `--cinematic` halo en las luces y grano · `--no-sfx` sin efectos de sonido
 - `--no-music-follow` no adaptar a la canción · `--no-accents` sin zooms/flashes automáticos
 
@@ -169,7 +251,8 @@ relativas al archivo JSON.
   "output": {"width": 1080, "height": 1920, "fps": 30, "crf": 18},
   "music":  {"src": "cancion.mp3", "start": 0, "volume": 1.0, "fade_out": 0.4},
   "grade":  "night_blue",            // look global (cada segmento puede tener el suyo)
-  "lut":    "mi_look.cube",          // opcional, LUT 3D
+  "lut":    "noche_azul",            // opcional: preset, "style:<estilo>" o ruta a un .cube (LUT 3D)
+  "lut_strength": 0.8,               // 0..1; cada segmento puede tener su "lut" / "lut_strength" ("none" = sin LUT)
   "color_match": {"r": [...], "g": [...], "b": [...]},  // look aprendido (lo rellena un estilo)
   "color_strength": 0.8,
   "sound_design": true,              // efectos de sonido automáticos según el montaje
@@ -248,6 +331,8 @@ videoeditor/
   project.py   modelo y validación del JSON
   render.py    render por segmentos + unión con concat/xfade + música y sonido
   effects.py   looks de color y efectos (filtros de FFmpeg)
+  luts.py      LUTs 3D (.cube): presets, aprendidos, intensidad, caché y hojas de contacto
+  luts/        los presets como archivos .cube (para CapCut, Premiere, DaVinci)
   beats.py     tempo y beats (búsqueda global de la rejilla)
   music.py     mapa musical: secciones, drop, energía, golpes
   auto.py      plantillas fijas y elección del mejor tramo de cada clip

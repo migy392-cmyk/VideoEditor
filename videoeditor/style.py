@@ -28,6 +28,7 @@ import numpy as np
 from .analyze import Analysis, analyze
 from .auto import AutoOptions, _rel, best_inpoint, motion_curve
 from .beats import detect
+from .luts import apply_to_project_data
 from . import ff
 
 BUILTIN_DIR = os.path.join(os.path.dirname(__file__), "styles")
@@ -386,7 +387,8 @@ def _pace_by_music(sections: list[dict], mm, b0: float, p: float, start_beat: fl
 def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | None = None,
                 project_dir: str = ".", variant: int | None = None, keep_order: bool = False,
                 color_strength: float = 0.8, follow_music: bool = True, accents: bool = True,
-                sound_design: bool = True, cinematic: bool = False) -> tuple[dict, object]:
+                sound_design: bool = True, cinematic: bool = False,
+                lut: str | None = None, lut_strength: float = 1.0) -> tuple[dict, object]:
     """Convierte estilo + clips + canción en un proyecto.
 
     Con `follow_music` el editor primero analiza la canción (secciones, drop, energía,
@@ -397,6 +399,10 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
     - corta justo al cambiar de sección y ajusta la densidad de cortes a la energía
     - cámara lenta en las bajadas y rampa de cámara lenta justo antes del drop
     - flash + zoom de golpe en el drop y zooms en los golpes fuertes
+
+    `lut` (opcional) se escribe en el proyecto: un preset (ver `luts.PRESETS`), un .cube, o
+    "style" / "style:<id>" para el LUT aprendido del color de este estilo (en ese caso no se
+    añade además el `color_match` por curvas, que haría lo mismo dos veces). `lut_strength` 0..1.
     """
     from .music import cached_music_map
 
@@ -588,7 +594,8 @@ def apply_style(style: dict, clips: list[str], music: str, opt: AutoOptions | No
             if sg["type"] in ("clip", "stack"):
                 sg.setdefault("effects", []).extend([{"type": "halation", "amount": 0.3},
                                                      {"type": "film_grain", "amount": 7}])
-    if style.get("color") and color_strength > 0:
+    chosen = apply_to_project_data(project, lut, lut_strength, style=style, project_dir=base) if lut else None
+    if style.get("color") and color_strength > 0 and not (chosen and chosen.startswith("style:")):
         project["color_match"] = style["color"]
         project["color_strength"] = color_strength
     return project, mm

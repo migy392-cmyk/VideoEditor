@@ -527,7 +527,9 @@ class LutTests(unittest.TestCase):
         data, _ = apply_style(style, [self.clip, self.clip], self.music, AutoOptions(), self.dir,
                               lut="teal_orange", lut_strength=0.7)
         self.assertEqual((data["lut"], data["lut_strength"]), ("teal_orange", 0.7))
-        self.assertIn("color_match", data)
+        self.assertNotIn("color_match", data)  # con un LUT elegido, el LUT manda
+        data, _ = apply_style(style, [self.clip, self.clip], self.music, AutoOptions(), self.dir)
+        self.assertIn("color_match", data)  # sin LUT, se copia el color del estilo
         data, _ = apply_style(style, [self.clip, self.clip], self.music, AutoOptions(), self.dir, lut="style")
         self.assertEqual(data["lut"], "style:gym_noche")
         self.assertNotIn("color_match", data)  # el LUT aprendido ya lleva el color del estilo

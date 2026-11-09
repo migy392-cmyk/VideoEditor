@@ -8,3 +8,4 @@ out/
 !examples/**/*.json
 .ve_cache/
 workspace/
+.claude/worktrees/

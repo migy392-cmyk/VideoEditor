@@ -55,7 +55,7 @@ function watchJob(id, box, onDone) {
 }
 
 // ------------------------------------------------------------------ estado
-const S = { meta: null, lib: { clips: [], music: [], references: [], renders: [] }, styles: [],
+const S = { meta: null, luts: [], lutChoice: "none", lib: { clips: [], music: [], references: [], renders: [] }, styles: [],
   project: null, pname: null, sel: -1, dirty: false, order: [], history: [], future: [], lastSnap: null };
 
 function setStatus() {
@@ -67,15 +67,20 @@ function setStatus() {
 function show(view) {
   $$("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
-  if (view === "editor") loadProjects();
+  if (view === "editor") { loadLuts().then(() => S.project && drawProjectForm()); loadProjects(); }
   if (view === "create") renderCreate();
   if (view === "styles") renderStyles();
 }
 $$("#tabs button").forEach((b) => b.addEventListener("click", () => show(b.dataset.view)));
 
 // ------------------------------------------------------------------ biblioteca
+async function loadLuts() {
+  try { S.luts = await api("/api/luts"); } catch { S.luts = []; }
+}
+
 async function loadLibrary() {
   S.lib = await api("/api/library");
+  loadLuts();
   for (const panel of $$("#view-library .panel[data-kind]")) {
     const kind = panel.dataset.kind;
     const ul = $(".items", panel);
@@ -122,6 +127,15 @@ async function showMusicMap(name, box) {
 
 function libItem(kind, it, link = false) {
   const isVideo = it.width != null;
+  if (kind === "luts") {
+    return h("li", {}, h("span", {}, "◐"),
+      h("div", { class: "grow" }, it.name, h("div", { class: "muted" }, `${Math.round(it.size / 1024)} KB`)),
+      h("button", { class: "danger", title: "Borrar", onclick: async () => {
+        if (!confirm(`¿Borrar ${it.name}?`)) return;
+        await api(`/api/library/${kind}/${enc(it.name)}`, { method: "DELETE" });
+        loadLibrary();
+      } }, "✕"));
+  }
   if (kind === "music") {
     const box = h("div", { style: "width:100%" });
     return h("li", { style: "flex-wrap:wrap" }, h("span", {}, "♪"),
@@ -151,7 +165,14 @@ function upload(kind, files) {
     const note = h("div", { class: "toast" }, `Subiendo ${f.name}… 0%`);
     document.body.append(note);
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) note.textContent = `Subiendo ${f.name}… ${Math.round(100 * e.loaded / e.total)}%`; };
-    xhr.onloadend = () => { note.remove(); if (xhr.status !== 200) toast(`Error subiendo ${f.name}`, true); resolve(); };
+    xhr.onloadend = () => {
+      note.remove();
+      if (xhr.status !== 200) {
+        let msg = ""; try { msg = JSON.parse(xhr.responseText).error; } catch { /* sin detalle */ }
+        toast(`Error subiendo ${f.name}${msg ? ": " + msg : ""}`, true);
+      }
+      resolve();
+    };
     xhr.open("PUT", `/api/upload/${kind}/${enc(f.name)}`);
     xhr.send(f);
   }))).then(loadLibrary);
@@ -227,7 +248,7 @@ $("#learn-btn").addEventListener("click", async () => {
 
 // ------------------------------------------------------------------ nuevo edit
 async function renderCreate() {
-  [S.styles, S.lib] = await Promise.all([api("/api/styles"), api("/api/library")]);
+  [S.styles, S.lib] = await Promise.all([api("/api/styles"), api("/api/library"), loadLuts()]);
   const sel = $("#create-style");
   const prev = sel.value;
   sel.innerHTML = "";
@@ -245,6 +266,33 @@ async function renderCreate() {
 }
 $("#create-music").addEventListener("change", (e) => e.target.value && showMusicMap(e.target.value, $("#create-music-map")));
 
+// Selector visual de LUT: miniaturas del primer clip elegido (o el primero de la biblioteca) con cada LUT.
+function drawLutPicker() {
+  const box = $("#create-luts");
+  box.innerHTML = "";
+  const sv = $("#create-style").value;
+  const learned = sv.startsWith("style:");
+  if (S.lutChoice === "style" && !learned) S.lutChoice = "none";
+  const clip = S.order[0] || S.lib.clips[0]?.name;
+  const clipInfo = S.lib.clips.find((c) => c.name === clip);
+  const strength = $("#create-lut-strength").value;
+  const t = round(Math.min(1.5, (clipInfo?.duration || 2) / 2), 2);
+  const items = [{ value: "none", name: "Sin LUT" }];
+  if (learned) items.push({ value: "style", name: "Aprendido del estilo", spec: sv });
+  items.push(...S.luts.filter((l) => l.kind !== "style").map((l) => ({ value: l.value, name: l.name, title: l.description })));
+  for (const it of items) {
+    const spec = it.spec || it.value;
+    const img = clip
+      ? h("img", { src: `/api/lut-thumb/${enc(clip)}?lut=${enc(spec)}&strength=${it.value === "none" ? 1 : strength}&t=${t}`, loading: "lazy" })
+      : h("div", { class: "muted" }, it.name);
+    box.append(h("div", { class: "thumb" + (S.lutChoice === it.value ? " sel" : ""), title: it.title || it.name,
+      onclick: () => { S.lutChoice = it.value; drawLutPicker(); } }, img, h("div", { class: "cap" }, it.name)));
+  }
+}
+$("#create-style").addEventListener("change", drawLutPicker);
+$("#create-lut-strength").addEventListener("input", (e) => { $("#create-lut-val").textContent = `${Math.round(e.target.value * 100)}%`; });
+$("#create-lut-strength").addEventListener("change", drawLutPicker);
+
 function drawClipPicker() {
   const box = $("#create-clips");
   box.innerHTML = "";
@@ -260,6 +308,7 @@ function drawClipPicker() {
       idx >= 0 ? h("div", { class: "n" }, idx + 1) : null,
       h("div", { class: "cap" }, `${c.name} · ${fmt(c.duration)}`)));
   }
+  drawLutPicker();
 }
 
 $("#create-btn").addEventListener("click", async () => {
@@ -276,6 +325,7 @@ $("#create-btn").addEventListener("click", async () => {
     keep_order: $("#create-order").checked,
     name: $("#create-name").value.trim() || undefined,
   };
+  if (S.lutChoice !== "none") { body.lut = S.lutChoice; body.lut_strength = parseFloat($("#create-lut-strength").value); }
   if (sv.startsWith("style:")) body.style = sv.slice(6); else body.template = sv.slice(4);
   try {
     const { job } = await post("/api/create", body);
@@ -383,7 +433,7 @@ function field(label, obj, key, type = "number", opts = {}) {
   } else if (type === "checkbox") {
     input = h("input", { type: "checkbox" });
     input.checked = !!obj[key];
-    input.addEventListener("change", () => { obj[key] = input.checked; changed(); if (opts.redraw) drawInspector(); });
+    input.addEventListener("change", () => { obj[key] = input.checked; changed(); if (opts.redraw) drawInspector(); if (opts.after) opts.after(); });
     return h("label", { class: "inline" }, input, label);
   } else {
     input = h("input", { type, step: opts.step || "0.05", min: opts.min, max: opts.max, placeholder: opts.placeholder || "" });
@@ -395,8 +445,16 @@ function field(label, obj, key, type = "number", opts = {}) {
     if (v === "" || v === undefined) delete obj[key]; else obj[key] = v;
     changed();
     if (opts.redraw) drawInspector();
+    if (opts.after) opts.after();
   });
   return h("label", {}, label, input);
+}
+
+// Opciones de LUT: [valor, etiqueta]. `current` se añade si no está en la lista (p. ej. una ruta a mano).
+function lutOptions(current) {
+  const opts = S.luts.map((l) => [l.value, ({ preset: "", user: "Mío: ", style: "" }[l.kind] || "") + l.name]);
+  if (current && current !== "none" && !opts.some((o) => o[0] === current)) opts.push([current, base(current)]);
+  return opts;
 }
 
 function drawProjectForm() {
@@ -407,6 +465,8 @@ function drawProjectForm() {
   if (p.motion_blur === undefined) p.motion_blur = true;
   f.append(
     field("Look de color", p, "grade", "select", { options: S.meta.grades }),
+    field("LUT", p, "lut", "select", { options: lutOptions(p.lut), empty: "(sin LUT)", after: drawProjectForm }),
+    p.lut ? field("Intensidad del LUT (0-1)", p, "lut_strength", "number", { step: "0.05", min: 0, max: 1, placeholder: "1" }) : null,
     p.color_match ? field("Copiar color aprendido (0-1)", p, "color_strength", "number", { step: "0.05", min: 0, max: 1 }) : null,
     field("Canción", p.music, "src", "select", { options: S.lib.music.map((m) => `../music/${m.name}`), empty: "(sin música)" }),
     field("Canción: empieza en (s)", p.music, "start", "number", { step: "0.1" }),
@@ -491,7 +551,9 @@ function drawInspector() {
   const main = h("div", { class: "form" },
     field("Tipo", s, "type", "select", { options: ["clip", "stack", "black", "color"], redraw: true }),
     field("Duración (s)", s, "duration", "number", { step: "0.01", min: 0.05 }),
-    field("Look propio", s, "grade", "select", { options: S.meta.grades, empty: "(el del proyecto)" }));
+    field("Look propio", s, "grade", "select", { options: S.meta.grades, empty: "(el del proyecto)" }),
+    field("LUT propio", s, "lut", "select", { options: [["none", "Sin LUT"], ...lutOptions(s.lut)], empty: "(el del proyecto)", redraw: true }),
+    s.lut && s.lut !== "none" ? field("Intensidad del LUT (0-1)", s, "lut_strength", "number", { step: "0.05", min: 0, max: 1, placeholder: "(la del proyecto)" }) : null);
   box.append(main);
 
   if (s.type === "clip") {

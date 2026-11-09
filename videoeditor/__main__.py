@@ -9,6 +9,9 @@
     python -m videoeditor serve      (interfaz web)
     python -m videoeditor beats cancion.mp3
     python -m videoeditor list
+    python -m videoeditor luts [--export DIR]
+    python -m videoeditor lut-preview clip.mp4 -o hoja.jpg [--at 1.5]
+    python -m videoeditor lut-learn referencia.mov -o mi_look.cube
 """
 from __future__ import annotations
 
@@ -64,10 +67,14 @@ def cmd_auto(args: argparse.Namespace) -> int:
                                  variant=args.variant, keep_order=args.keep_order,
                                  color_strength=args.color_strength,
                                  follow_music=not args.no_music_follow, accents=not args.no_accents,
-                                 sound_design=not args.no_sfx, cinematic=args.cinematic)
+                                 sound_design=not args.no_sfx, cinematic=args.cinematic,
+                                 lut=args.lut, lut_strength=args.lut_strength)
     else:
         print(f"Analizando música y clips (plantilla '{args.template}')…")
         data, info = build_project(args.clips, args.music, args.template, opt, project_dir)
+        if args.lut:
+            from .luts import apply_to_project_data
+            apply_to_project_data(data, args.lut, args.lut_strength, project_dir=project_dir)
     print(f"  Tempo: {info.bpm:.1f} BPM · {len(data['segments'])} segmentos")
     mi = data.get("info", {})
     if mi.get("sections"):
@@ -107,6 +114,50 @@ def cmd_styles(args: argparse.Namespace) -> int:
         tag = " (incluido)" if s.get("builtin") else ""
         print(f"- {s['name']}{tag}: {len(s.get('variants', []))} variante(s), "
               f"aprendido de {', '.join(s.get('sources', []))}; transiciones {st.get('transitions')}")
+    return 0
+
+
+def cmd_luts(args: argparse.Namespace) -> int:
+    from . import luts
+
+    if args.export:
+        paths = luts.export_presets(args.export)
+        print(f"{len(paths)} LUTs .cube escritos en {args.export} (listos para CapCut, Premiere, DaVinci…)")
+        return 0
+    items = luts.list_luts(args.workspace or DEFAULT_WORKSPACE)
+    for kind, title in (("preset", "Presets"), ("user", "LUTs propios"), ("style", "Aprendidos de un estilo")):
+        sel = [i for i in items if i["kind"] == kind]
+        if sel:
+            print(f"{title}:")
+            for i in sel:
+                print(f"  {i['value']:<22} {i['name']} - {i['description']}")
+    print("\nUso: auto --lut ID --lut-strength 0.8  ·  en el JSON: \"lut\": \"ID\", \"lut_strength\": 0.8")
+    return 0
+
+
+def cmd_lut_preview(args: argparse.Namespace) -> int:
+    from . import luts
+
+    specs = None
+    if args.luts:
+        names = {i["value"]: i["name"] for i in luts.list_luts(args.workspace or DEFAULT_WORKSPACE)}
+        specs = [("Original", "none")] + [(names.get(v.strip(), os.path.basename(v.strip())), v.strip()) for v in args.luts.split(",")]
+    elif args.all:
+        specs = [("Original", "none")] + [(i["name"], i["value"]) for i in luts.list_luts(args.workspace or DEFAULT_WORKSPACE)]
+    luts.contact_sheet(args.clip, args.output, at=args.at, specs=specs, strength=args.lut_strength,
+                       cell_w=args.width, cols=args.cols)
+    print(f"Hoja de LUTs guardada en {args.output}")
+    return 0
+
+
+def cmd_lut_learn(args: argparse.Namespace) -> int:
+    from . import luts
+
+    neutral = luts.video_profile(args.neutral) if args.neutral else None
+    text = luts.lut_from_video(args.video, neutral, strength=args.lut_strength)
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"LUT aprendido de {os.path.basename(args.video)} guardado en {args.output}")
     return 0
 
 
@@ -190,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--no-sfx", action="store_true", help="Sin efectos de sonido automáticos")
     a.add_argument("--cinematic", action="store_true", help="Look de cine: halo en las luces y grano")
     a.add_argument("--grade", help="Look de color adicional (ver 'list')")
+    a.add_argument("--lut", help="LUT de color: preset (ver 'luts'), 'style' (el aprendido del estilo), "
+                                 "'style:ID' o un .cube")
+    a.add_argument("--lut-strength", type=float, default=1.0, help="Intensidad del LUT (0-1)")
     a.add_argument("--width", type=int)
     a.add_argument("--height", type=int)
     a.add_argument("--fps", type=int, default=30)
@@ -227,9 +281,33 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--limit", type=int, default=32)
     b.set_defaults(fn=cmd_beats)
 
+    lu = sub.add_parser("luts", help="Lista los LUTs de color (presets y propios) o los exporta como .cube")
+    lu.add_argument("--export", metavar="DIR", help="Escribe todos los presets como .cube en DIR")
+    lu.set_defaults(fn=cmd_luts)
+
+    lp = sub.add_parser("lut-preview", help="Hoja de contacto: un fotograma del clip con cada LUT")
+    lp.add_argument("clip")
+    lp.add_argument("-o", "--output", default="luts.jpg")
+    lp.add_argument("--at", type=float, default=1.0, help="Segundo del clip (por defecto 1.0)")
+    lp.add_argument("--luts", help="Sólo estos LUTs (ids separados por comas)")
+    lp.add_argument("--all", action="store_true", help="Incluye también LUTs propios y aprendidos de estilos")
+    lp.add_argument("--lut-strength", type=float, default=1.0)
+    lp.add_argument("--width", type=int, default=270, help="Ancho de cada miniatura")
+    lp.add_argument("--cols", type=int)
+    lp.set_defaults(fn=cmd_lut_preview)
+
+    ll = sub.add_parser("lut-learn", help="Crea un LUT .cube con el color de un video de referencia")
+    ll.add_argument("video")
+    ll.add_argument("-o", "--output", required=True)
+    ll.add_argument("--neutral", help="Un clip tuyo: el LUT lleva ese material hacia la referencia")
+    ll.add_argument("--lut-strength", type=float, default=1.0)
+    ll.set_defaults(fn=cmd_lut_learn)
+
     sub.add_parser("list", help="Lista plantillas, looks, efectos y transiciones").set_defaults(fn=cmd_list)
 
     args = p.parse_args(argv)
+    from . import luts
+    luts.set_workspace(args.workspace or DEFAULT_WORKSPACE)
     try:
         ff.require_ffmpeg()
         return args.fn(args)

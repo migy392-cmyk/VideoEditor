@@ -111,3 +111,8 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
 .qa.ok { background: rgba(48,164,108,.15); border: 1px solid var(--ok); }
 .qa.warn { background: rgba(245,165,36,.12); border: 1px solid var(--accent2); }
 .qa ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* selector de LUTs */
+.lut-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); margin-bottom: 14px; }
+.lut-grid .thumb .cap { font-size: 11px; text-align: center; background: rgba(0,0,0,.65); }
+.lut-grid .thumb.none { display: grid; place-items: center; aspect-ratio: 9/16; color: var(--muted, #888); font-size: 12px; }

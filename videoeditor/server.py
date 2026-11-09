@@ -6,12 +6,14 @@ Carpeta de trabajo:
     workspace/clips        tus clips
     workspace/music        canciones
     workspace/references   videos de referencia para aprender estilos
+    workspace/luts         tus LUTs de color (.cube)
     workspace/styles       estilos aprendidos (JSON)
     workspace/projects     proyectos (JSON)
     workspace/renders      videos renderizados
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -24,10 +26,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import ff
+from . import ff, luts
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-KINDS = ("clips", "music", "references")
+KINDS = ("clips", "music", "references", "luts")
 MEDIA_KINDS = KINDS + ("renders",)
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 AUDIO_EXT = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"} | VIDEO_EXT
@@ -85,6 +87,7 @@ class App:
         for d in KINDS + ("styles", "projects", "renders", "cache"):
             os.makedirs(os.path.join(self.ws, d), exist_ok=True)
         self.jobs = Jobs()
+        luts.set_workspace(self.ws)
 
     def path(self, kind: str, name: str = "") -> str:
         if kind not in MEDIA_KINDS + ("styles", "projects", "cache"):
@@ -102,6 +105,9 @@ class App:
                 if fn.startswith(".") or not os.path.isfile(p) or fn.endswith(".part"):
                     continue
                 item = {"name": fn, "size": os.path.getsize(p)}
+                if kind == "luts":
+                    items.append(item)
+                    continue
                 try:
                     item["duration"] = round(ff.duration(p), 2)
                     if os.path.splitext(fn)[1].lower() in VIDEO_EXT:
@@ -119,6 +125,45 @@ class App:
         if not os.path.exists(out):
             ff.run(["-ss", f"{max(0.0, t):.2f}", "-i", src, "-frames:v", "1", "-vf", "scale=240:-2", "-q:v", "4", out])
         return out
+
+    # ---------------- LUTs ----------------
+    def luts(self) -> list[dict]:
+        return luts.list_luts(self.ws)
+
+    def lut_thumb(self, clip: str, spec: str, strength: float, t: float) -> str:
+        """Fotograma del clip con el LUT aplicado (miniatura en caché). spec "none" = sin LUT."""
+        src = self.path("clips", clip)
+        spec = (spec or "none").strip()
+        strength = min(1.0, max(0.0, strength))
+        if spec != "none":
+            kind, value = luts.classify(spec, os.path.join(self.ws, "projects"))
+            if kind == "file":
+                spec = value
+        sig = f"{clip}|{spec}|{strength:.2f}|{t:.2f}|{os.path.getmtime(src)}"
+        if spec.startswith("style:") or os.path.isfile(spec):
+            sig += f"|{self._lut_mtime(spec)}"
+        key = "lut_" + hashlib.sha1(sig.encode()).hexdigest()[:16] + ".jpg"
+        out = os.path.join(self.ws, "cache", key)
+        if not os.path.exists(out):
+            tmp = out + ".part.jpg"
+            luts.preview_frame(src, t, tmp, None if spec == "none" else spec, strength, width=180,
+                               base_dir=os.path.join(self.ws, "projects"))
+            os.replace(tmp, out)
+        return out
+
+    def _lut_mtime(self, spec: str) -> float:
+        if spec.startswith("style:"):
+            p = os.path.join(self.ws, "styles", spec[6:] + ".json")
+            return os.path.getmtime(p) if os.path.exists(p) else 0.0
+        return os.path.getmtime(spec)
+
+    def save_lut(self, dest: str) -> None:
+        """Comprueba que el archivo subido es un LUT 3D válido; si no, lo borra."""
+        try:
+            luts.read_cube(dest)
+        except luts.LutError:
+            os.remove(dest)
+            raise
 
     # ---------------- estilos ----------------
     def styles(self) -> list[dict]:
@@ -165,6 +210,7 @@ class App:
                           grade=req.get("grade") or None,
                           smart_inpoints=not req.get("no_smart", False))
         pdir = self.path("projects")
+        lut, lut_strength = req.get("lut") or None, float(req.get("lut_strength", 1.0))
         if req.get("style"):
             log("Aplicando estilo…")
             style = find_style(req["style"], self.path("styles"))
@@ -174,13 +220,15 @@ class App:
                                   follow_music=req.get("follow_music", True) is not False,
                                   accents=req.get("accents", True) is not False,
                                   sound_design=req.get("sound_design", True) is not False,
-                                  cinematic=bool(req.get("cinematic")))
+                                  cinematic=bool(req.get("cinematic")), lut=lut, lut_strength=lut_strength)
             mi = data.get("info", {})
             log(f"Canción desde {data['music']['start']:.2f}s"
                 + (f" · drop en el segundo {mi['drop']:.2f} del edit" if mi.get("drop") is not None else ""))
         else:
             log("Aplicando plantilla…")
             data, _ = build_project(clips, music, req.get("template") or "gym_stack", opt, pdir)
+            if lut:
+                luts.apply_to_project_data(data, lut, lut_strength, project_dir=pdir)
         name = safe_name(req.get("name") or f"edit_{time.strftime('%Y%m%d_%H%M%S')}")
         with open(self.project_path(name), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -324,6 +372,11 @@ def make_handler(app: App):
                     return self.send_json(app.library())
                 if len(api) == 3 and api[0] == "thumb":
                     return self.send_file(app.thumb(api[1], api[2], float(q.get("t", 0.5))), "image/jpeg")
+                if api == ["luts"]:
+                    return self.send_json(app.luts())
+                if len(api) == 2 and api[0] == "lut-thumb":
+                    return self.send_file(app.lut_thumb(api[1], q.get("lut", "none"), float(q.get("strength", 1.0)),
+                                                        float(q.get("t", 1.0))), "image/jpeg")
                 if api == ["styles"]:
                     return self.send_json(app.styles())
                 if api == ["projects"]:
@@ -351,7 +404,10 @@ def make_handler(app: App):
             parts = [unquote(p) for p in u.path.strip("/").split("/") if p]
             try:
                 if len(parts) == 4 and parts[:2] == ["api", "upload"] and parts[2] in KINDS:
-                    dest = app.path(parts[2], parts[3])
+                    name = parts[3]
+                    if parts[2] == "luts" and not name.lower().endswith(luts.LUT_EXT):
+                        name += ".cube"
+                    dest = app.path(parts[2], name)
                     n = int(self.headers.get("Content-Length") or 0)
                     tmp = dest + ".part"
                     with open(tmp, "wb") as f:
@@ -366,13 +422,15 @@ def make_handler(app: App):
                         os.remove(tmp)
                         return self.error("Subida incompleta")
                     os.replace(tmp, dest)
+                    if parts[2] == "luts":
+                        app.save_lut(dest)
                     ff.probe.cache_clear()
                     return self.send_json({"ok": True, "name": os.path.basename(dest)})
                 if len(parts) == 3 and parts[:2] == ["api", "projects"]:
                     app.save_project(parts[2], self.read_json())
                     return self.send_json({"ok": True})
                 return self.error("No encontrado", 404)
-            except (ValueError, OSError) as e:
+            except (ValueError, OSError) as e:  # LutError es un ValueError
                 return self.error(e)
 
         def do_POST(self):

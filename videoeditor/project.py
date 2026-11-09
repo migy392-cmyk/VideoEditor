@@ -6,6 +6,8 @@ Formato (todas las rutas son relativas al archivo JSON):
   "output":  {"width": 1080, "height": 1920, "fps": 30, "crf": 18},
   "music":   {"src": "cancion.mp3", "start": 0, "volume": 1.0, "fade_out": 0.4},
   "grade":   "night_blue",
+  "lut":     "noche_azul",       // opcional: preset, "style:<estilo>" o ruta a un .cube
+  "lut_strength": 0.8,           // 0..1 (cada segmento puede tener su "lut" / "lut_strength")
   "segments": [
     {"type": "black", "duration": 0.5},
     {"type": "stack", "duration": 3.5, "panels": [
@@ -131,6 +133,8 @@ class Segment:
     effects: list[Effect] = field(default_factory=list)
     texts: list[Text] = field(default_factory=list)
     grade: str | None = None  # None => usa el grade global
+    lut: str | None = None    # None => el del proyecto; "none" => sin LUT en este segmento
+    lut_strength: float | None = None  # None => la del proyecto
 
 
 @dataclass
@@ -158,7 +162,8 @@ class Project:
     segments: list[Segment]
     music: Music | None = None
     grade: str = "none"
-    lut: str | None = None
+    lut: str | None = None             # preset, "style:<id>" o ruta a un .cube
+    lut_strength: float = 1.0          # 0..1: mezcla identidad -> LUT
     color_match: dict[str, list[float]] | None = None  # cuantiles RGB objetivo (look aprendido)
     color_strength: float = 0.8
     beats: list[float] | None = None  # beats de la música (para revisar los cortes)
@@ -304,6 +309,32 @@ def _sfx_list(v: Any) -> list[dict] | None:
     return out
 
 
+def _lut_spec(v: Any, base_dir: str, where: str, explicit_none: bool = False) -> str | None:
+    """Valida un LUT (preset, 'style:id' o ruta). None/"none" -> sin LUT ("none" si es explícito en un segmento)."""
+    from . import luts
+
+    if v is None or (isinstance(v, str) and v.strip().lower() in ("", "none", "ninguno")):
+        return "none" if explicit_none else None
+    if not isinstance(v, str):
+        raise ProjectError(f"{where}: 'lut' debe ser un texto (id de preset, 'style:id' o ruta a un .cube)")
+    try:
+        kind, value = luts.classify(v, base_dir)
+        luts.validate_spec(v, base_dir)
+    except luts.LutError as e:
+        raise ProjectError(f"{where}: {e}")
+    return value if kind == "file" else v.strip()
+
+
+def _lut_strength(v: Any, where: str) -> float:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ProjectError(f"{where}: 'lut_strength' debe ser un número entre 0 y 1 (recibido {v!r})")
+    if not 0.0 <= x <= 1.0:
+        raise ProjectError(f"{where}: 'lut_strength' debe estar entre 0 y 1 (recibido {x})")
+    return x
+
+
 def parse_project(data: dict, base_dir: str = ".") -> Project:
     from .effects import GRADES
 
@@ -356,6 +387,10 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
             gap=int(s.get("gap", 0)),
             grade=s.get("grade"),
         )
+        if "lut" in s:  # ausente = hereda; null / "none" = sin LUT
+            seg.lut = _lut_spec(s["lut"], base_dir, where, explicit_none=True)
+        if s.get("lut_strength") is not None:
+            seg.lut_strength = _lut_strength(s["lut_strength"], where)
         if seg.grade is not None and seg.grade not in GRADES:
             raise ProjectError(f"{where}: grade '{seg.grade}' desconocido")
         if t == "clip":
@@ -384,13 +419,15 @@ def parse_project(data: dict, base_dir: str = ".") -> Project:
     if cm is not None:
         if not (isinstance(cm, dict) and all(isinstance(cm.get(c), list) and len(cm[c]) >= 3 for c in "rgb")):
             raise ProjectError("color_match debe tener listas 'r', 'g' y 'b' de cuantiles")
-    lut = data.get("lut")
+    lut = _lut_spec(data.get("lut"), base_dir, "lut")
+    lut_strength = _lut_strength(data["lut_strength"], "lut_strength") if data.get("lut_strength") is not None else 1.0
     return Project(
         output=output,
         segments=segments,
         music=music,
         grade=grade,
-        lut=_resolve(base_dir, lut) if lut else None,
+        lut=lut,
+        lut_strength=lut_strength,
         color_match=cm,
         beats=(data.get("info") or {}).get("beats"),
         drop=(data.get("info") or {}).get("drop"),
@@ -417,8 +454,16 @@ def check_sources(project: Project) -> list[str]:
         if s.source:
             paths.append(s.source.src)
         paths.extend(p.src for p in s.panels)
-    if project.lut:
-        paths.append(project.lut)
+    from . import luts
+
+    for spec in [project.lut] + [s.lut for s in project.segments]:
+        if spec and spec != "none":
+            try:
+                f = luts.referenced_file(spec, project.base_dir)
+            except luts.LutError:
+                f = None
+            if f:
+                paths.append(f)
     for p in paths:
         if not os.path.exists(p) and p not in missing:
             missing.append(p)

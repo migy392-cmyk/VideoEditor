@@ -19,7 +19,7 @@ import time
 from dataclasses import replace
 from functools import lru_cache
 
-from . import ff
+from . import ff, luts
 from .effects import effect_filters, grade_filters
 from .project import Project, Segment, Source, Text
 
@@ -85,14 +85,19 @@ def _hdr_transfer(path: str) -> str | None:
     return None
 
 
+def _hdr_chain(trc: str) -> list[str]:
+    """HDR (iPhone) a SDR con mapeo de tonos; si no, se ve lavado/gris."""
+    return [f"zscale=tin={trc}:min=bt2020nc:pin=bt2020:t=linear:npl=100", "format=gbrpf32le",
+            "zscale=p=bt709", "tonemap=tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:r=tv",
+            "format=yuv420p"]
+
+
 def _source_chain(src: Source, dur: float, w: int, h: int, fps: int) -> list[str]:
     """Filtros que convierten un input (ya recortado con -ss/-t) en un plano de w x h y `dur` segundos."""
     chain = []
     trc = _hdr_transfer(src.src)
-    if trc:  # HDR (iPhone): a SDR con mapeo de tonos, si no se ve lavado/gris
-        chain += [f"zscale=tin={trc}:min=bt2020nc:pin=bt2020:t=linear:npl=100", "format=gbrpf32le",
-                  "zscale=p=bt709", "tonemap=tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:r=tv",
-                  "format=yuv420p"]
+    if trc:
+        chain += _hdr_chain(trc)
     if src.stabilize:
         chain.append(f"vidstabtransform=input='{src.stabilize}':smoothing=12:zoom=4:optzoom=0:interpol=bilinear")
     if src.reverse:
@@ -163,13 +168,18 @@ def _color_match_filter(src: Source, dur: float, target: dict, strength: float) 
 
 
 def _look(project: Project, seg: Segment, src: Source | None, dur: float) -> list[str]:
-    """Color de un plano: look aprendido (color_match) + grade + LUT."""
+    """Color de un plano: look aprendido (color_match) + grade + LUT (preset, aprendido o archivo)."""
     look = []
     if project.color_match and src is not None and project.color_strength > 0:
         look.append(_color_match_filter(src, dur, project.color_match, min(1.0, project.color_strength)))
     look += grade_filters(seg.grade if seg.grade is not None else project.grade)
-    if project.lut:
-        look.append(f"lut3d=file='{project.lut}'")
+    # LUT: el del segmento si lo tiene ("none" lo desactiva), si no el del proyecto.
+    # Se aplica por plano (no a negros/color ni a los fondos de los stacks).
+    spec = seg.lut if seg.lut is not None else project.lut
+    strength = seg.lut_strength if seg.lut_strength is not None else project.lut_strength
+    flt = luts.lut_filter(spec, strength, project.base_dir)
+    if flt:
+        look.append(flt)
     return look
 
 

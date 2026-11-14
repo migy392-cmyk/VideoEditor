@@ -73,3 +73,6 @@ Opciones útiles de `auto`: `--duration S`, `--music-start S` (por defecto autom
   - Las transiciones no desplazan los tiempos: cada segmento empieza en la suma de los anteriores; el corte (o el aterrizaje en slides/subject_drop) cae en el beat.
   - Comprueba visualmente: extrae fotogramas con `ffmpeg -vf "fps=4,scale=120:-2,tile=..."` y míralos.
 - Commits con mensajes claros en español; no hagas push salvo que el usuario lo pida.
+
+## Modo director y entrega a DaVinci Resolve (en construcción)
+El plan para dirigir edits automáticos con subagentes y entregarlos en DaVinci Resolve gratis está en `docs/director/` (empieza por `README.md`; para el usuario, `COMO_FUNCIONA.md`). Los subagentes están definidos en `.claude/agents/`. Las decisiones tomadas y las preguntas abiertas se apuntan en `docs/director/DECISIONES.md`.
